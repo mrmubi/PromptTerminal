@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.vs/
+node_modules/
+src/PromptTerminal.App/Web/vendor/
+TestResults/
+artifacts/
+*.user
+*.suo

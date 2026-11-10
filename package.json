@@ -1,0 +1,23 @@
+{
+  "name": "promptterminal-assets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local terminal renderer and desktop UI validation",
+  "scripts": {
+    "postinstall": "node tools\\vendor-terminal.cjs",
+    "vendor": "node tools\\vendor-terminal.cjs",
+    "icon": "node tools\\generate-app-icon.cjs",
+    "test:ui": "node --test tests\\ui\\workspace.test.cjs",
+    "test:desktop": "node tests\\ui\\desktop-smoke.cjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/xterm": "6.0.0"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}

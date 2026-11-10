@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyTitle>Prompt Terminal</AssemblyTitle>
+    <Product>Prompt Terminal</Product>
+    <ApplicationIcon>Assets\PromptTerminal.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PromptTerminal.Core\PromptTerminal.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\PromptTerminal.ico" />
+    <Content Include="Web\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\README.md" Link="README.md" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\SPECIFICATION.md" Link="SPECIFICATION.md" CopyToPublishDirectory="PreserveNewest" />
+    <RequiredRendererAsset Include="Web\index.html;Web\app-icon.svg;Web\workspace.js;Web\workspace.css;Web\vendor\xterm.js;Web\vendor\xterm.css;Web\vendor\addon-fit.js;Web\vendor\addon-search.js;Web\vendor\addon-serialize.js;Web\vendor\addon-web-links.js;Web\vendor\xterm.LICENSE;Web\vendor\addon-fit.LICENSE;Web\vendor\addon-search.LICENSE;Web\vendor\addon-serialize.LICENSE;Web\vendor\addon-web-links.LICENSE" />
+  </ItemGroup>
+
+  <Target Name="ValidateRendererAssets" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('%(RequiredRendererAsset.Identity)')"
+           Text="Missing bundled renderer asset %(RequiredRendererAsset.Identity). Run npm ci (or npm run vendor with dependencies already installed), then rebuild." />
+  </Target>
+
+</Project>
