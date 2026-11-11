@@ -31,7 +31,7 @@ public sealed record ItemReference(Guid Id);
 public sealed record NewTabOptions(string Name);
 public sealed record TabProperties(Guid TabId, string Name, string AccentColor);
 public sealed record TabOrder(Guid TabId, int Index);
-public sealed record PaneCreation(Guid TabId, Guid? TargetPaneId, SplitAxis Axis, bool Floating, PaneDefinition Pane);
+public sealed record PaneCreation(Guid TabId, Guid? TargetPaneId, SplitAxis? Axis, bool? Floating, PaneDefinition Pane);
 public sealed record PaneSplit(Guid PaneId, SplitAxis Axis);
 public sealed record PaneEdit(Guid PaneId, string Name, LaunchProfile Profile, bool ReadOnly, LaunchPlan Plan);
 public sealed record PaneMove(Guid PaneId, Guid TabId);
@@ -112,7 +112,7 @@ public static class WorkspaceCommands
                 pane.Profile.Id = Guid.NewGuid();
                 pane.Name = source.Name[..Math.Min(source.Name.Length, 90)] + " copy";
                 pane.Plan = new();
-                WorkspaceLayout.AddPane(tab, pane, source.Id, options.Axis);
+                WorkspaceLayout.AddPane(tab, pane, source.Id, options.Axis, floating: false);
                 break;
             }
             case "editPane":

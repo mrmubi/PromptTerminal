@@ -93,6 +93,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 .pane-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .pane-metrics { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .pane-signal { color: var(--warning); overflow: hidden; text-overflow: ellipsis; max-width: 180px; white-space: nowrap; }
+.pane-schedule { overflow: hidden; text-overflow: ellipsis; max-width: 190px; white-space: nowrap; }
+#power-status { white-space: nowrap; }
+.list-row > span { white-space: pre-line; }
 .resize-grip { display: none; }
 .floating .resize-grip { display: block; position: absolute; width: 17px; height: 17px; right: 0; bottom: 0; cursor: nwse-resize; touch-action: none; background: linear-gradient(135deg, transparent 55%, var(--border) 56%, var(--border) 65%, transparent 66%, transparent 77%, var(--border) 78%); z-index: 3; }
 .splitter { position: absolute; z-index: 5; border-radius: 3px; background: transparent; touch-action: none; }

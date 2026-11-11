@@ -78,16 +78,30 @@ public sealed class WorkspaceTests : IDisposable
         var document = WorkspaceDefaults.Create();
         document.Settings.Theme = theme;
         document.Settings.ScreenReaderMode = true;
+        document.Settings.PreventSleep = true;
+        document.MainWindow = new() { Width = 1200, Height = 760, Maximized = true };
+        document.Workspace.Tabs[0].Panes[0].Plan.Recurrence = new()
+        {
+            Frequency = ScheduleFrequency.Weekly, Time = new(14, 30), Day = DayOfWeek.Friday
+        };
         var store = new WorkspaceStore(Path.Combine(_directory, "state.json"));
         await store.SaveAsync(document);
         var restored = await store.LoadAsync();
         Assert.NotNull(restored);
         Assert.Equal(theme, restored.Settings.Theme);
         Assert.True(restored.Settings.ScreenReaderMode);
+        Assert.True(restored.Settings.PreventSleep);
+        Assert.Equal(1200, restored.MainWindow.Width);
+        Assert.Equal(760, restored.MainWindow.Height);
+        Assert.True(restored.MainWindow.Maximized);
+        Assert.Equal(ScheduleFrequency.Weekly, restored.Workspace.Tabs[0].Panes[0].Plan.Recurrence!.Frequency);
+        Assert.Equal(new TimeOnly(14, 30), restored.Workspace.Tabs[0].Panes[0].Plan.Recurrence!.Time);
         Assert.Equal(document.Workspace.Tabs[0].Panes[0].Id, restored.Workspace.Tabs[0].Panes[0].Id);
         var json = await File.ReadAllTextAsync(store.Path);
         Assert.DoesNotContain("processId", json);
         Assert.DoesNotContain("generation", json);
+        Assert.DoesNotContain("nextRun", json);
+        Assert.DoesNotContain("Armed", json);
     }
 
     [Fact]
@@ -129,6 +143,34 @@ public sealed class WorkspaceTests : IDisposable
         Assert.Empty(exported.Tabs[0].Panes[0].Profile.ResumeScript);
         Assert.Empty(exported.Tabs[0].Panes[0].Profile.Environment);
         Assert.Equal("sensitive startup", profile.StartupScript);
+    }
+
+    [Theory]
+    [InlineData(double.NaN, 900)]
+    [InlineData(1450, double.PositiveInfinity)]
+    [InlineData(0, 900)]
+    [InlineData(1450, 100)]
+    public void InvalidRememberedWindowSizesAreRejected(double width, double height)
+    {
+        var document = WorkspaceDefaults.Create();
+        document.MainWindow.Width = width;
+        document.MainWindow.Height = height;
+        Assert.Throws<InvalidDataException>(() => WorkspaceValidator.Validate(document));
+    }
+
+    [Fact]
+    public void OlderDocumentsGetSafePowerWindowAndRecurrenceDefaults()
+    {
+        var json = JsonSerializer.SerializeToNode(WorkspaceDefaults.Create(), WorkspaceJson.Options)!;
+        json.AsObject().Remove("mainWindow");
+        json["settings"]!.AsObject().Remove("preventSleep");
+        foreach (var pane in json["workspace"]!["tabs"]![0]!["panes"]!.AsArray())
+            pane!["plan"]!.AsObject().Remove("recurrence");
+        var restored = json.Deserialize<ApplicationDocument>(WorkspaceJson.Options)!;
+        WorkspaceValidator.Validate(restored);
+        Assert.False(restored.Settings.PreventSleep);
+        Assert.Equal(1450, restored.MainWindow.Width);
+        Assert.Null(restored.Workspace.Tabs[0].Panes[0].Plan.Recurrence);
     }
 
     public void Dispose()

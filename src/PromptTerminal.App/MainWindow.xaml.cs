@@ -12,6 +12,7 @@ using Microsoft.Win32;
 using PromptTerminal.Core.Git;
 using PromptTerminal.Core.Models;
 using PromptTerminal.Core.Persistence;
+using PromptTerminal.Core.Power;
 using PromptTerminal.Core.Terminal;
 
 namespace PromptTerminal.App;
@@ -22,6 +23,8 @@ public partial class MainWindow : Window
     private readonly WorkspaceStore _store = new(Path.Combine(App.DataDirectory, "workspace.json"));
     private readonly SemaphoreSlim _commands = new(1, 1);
     private readonly Dictionary<Guid, PaneRuntime> _runtimes = [];
+    private readonly Dictionary<Guid, ScheduledLaunch> _schedules = [];
+    private readonly KeepAwakeController _keepAwake = new();
     private readonly Dictionary<Guid, long> _generations = [];
     private readonly Dictionary<Guid, Guid> _maximized = [];
     private readonly HashSet<Guid> _unread = [];
@@ -31,6 +34,7 @@ public partial class MainWindow : Window
     private Task _saveTask = Task.CompletedTask;
     private bool _ready, _initializing, _checkingQueue, _shuttingDown, _allowClose;
     private bool _recreateBrowser;
+    private bool _windowPreferencesLoaded;
     private CoreWebView2? _activeCore;
     private bool _persistenceEnabled = true, _dark = true;
     private int _ticks;
@@ -40,6 +44,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _timer.Tick += OnTimer;
+        SizeChanged += (_, _) => CaptureWindowSize();
+        StateChanged += (_, _) => CaptureWindowSize();
         SystemEvents.UserPreferenceChanged += OnSystemAppearanceChanged;
     }
 
@@ -48,6 +54,8 @@ public partial class MainWindow : Window
         try
         {
             await LoadWorkspaceAsync();
+            RestoreWindowSize();
+            ApplyPowerPreference();
             ApplyHostTheme();
             await InitializeRendererAsync();
             _timer.Start();
@@ -229,6 +237,16 @@ public partial class MainWindow : Window
                 if (panes.Length == 0) throw new InvalidOperationException("There are no stopped panes to start in this workspace.");
                 return await QueueStartsAsync(panes, false);
             }
+            case "armSchedule":
+                return await ArmScheduleAsync(WorkspaceCommands.FindPane(_document.Workspace,
+                    request.Read<PaneReference>().PaneId).Pane);
+            case "cancelSchedule":
+            {
+                if (!_schedules.Remove(request.Read<PaneReference>().PaneId))
+                    throw new InvalidOperationException("This pane has no armed schedule.");
+                await PublishStateAsync();
+                return true;
+            }
             case "interrupt":
             {
                 var runtime = RuntimeForPane(request.Read<PaneReference>().PaneId);
@@ -244,7 +262,8 @@ public partial class MainWindow : Window
                 if (!_runtimes.TryGetValue(id, out var runtime) || !IsBusy(runtime))
                     throw new InvalidOperationException("This pane has no live or queued session.");
                 if (!Confirm("Stop session", $"Forcibly stop the process tree for {pane.Name}?\n\n" +
-                        "Interrupt with Ctrl+C first if appropriate. Other panes are not affected.", "Stop session")) return false;
+                        "Interrupt with Ctrl+C first if appropriate. This also disarms this pane's recurring schedule. Other panes are not affected.", "Stop session")) return false;
+                _schedules.Remove(id);
                 await StopRuntimeAsync(runtime);
                 return true;
             }
@@ -255,11 +274,16 @@ public partial class MainWindow : Window
                     ? new[] { request.Read<PaneReference>().PaneId }
                     : WorkspaceCommands.FindTab(_document.Workspace, request.Read<TabReference>().TabId).Panes.Select(p => p.Id).ToArray();
                 var busy = ids.Select(id => _runtimes.GetValueOrDefault(id)).OfType<PaneRuntime>().Where(IsBusy).ToArray();
-                if (busy.Length > 0 && !Confirm("Close sessions",
+                var scheduled = ids.Count(id => _schedules.ContainsKey(id));
+                if ((busy.Length > 0 || scheduled > 0) && !Confirm("Close sessions",
                         $"Closing this {(request.Type == "closePane" ? "pane" : "tab")} stops {busy.Length} live or queued session(s).\n\n" +
-                        "Use Interrupt first if appropriate. Only their owned process trees will be stopped.", "Close and stop")) return false;
+                        $"It also disarms {scheduled} recurring schedule(s). Use Interrupt first if appropriate. Only their owned process trees will be stopped.", "Close and stop")) return false;
                 await Task.WhenAll(busy.Select(StopRuntimeAsync));
-                foreach (var id in ids) _runtimes.Remove(id);
+                foreach (var id in ids)
+                {
+                    _runtimes.Remove(id);
+                    _schedules.Remove(id);
+                }
                 Commit(request);
                 await PublishStateAsync();
                 return true;
@@ -337,7 +361,9 @@ public partial class MainWindow : Window
 
     private void Commit(BridgeRequest request)
     {
-        _document = WorkspaceCommands.Apply(_document, request);
+        var updated = WorkspaceCommands.Apply(_document, request);
+        if (request.Type == "settings") _keepAwake.SetEnabled(updated.Settings.PreventSleep);
+        _document = updated;
         foreach (var tabId in _maximized.Keys.ToArray())
             if (!_document.Workspace.Tabs.Any(t => t.Id == tabId && t.Panes.Any(p => p.Id == _maximized[tabId])))
                 _maximized.Remove(tabId);
@@ -351,39 +377,56 @@ public partial class MainWindow : Window
         {
             if (_runtimes.TryGetValue(pane.Id, out var runtime) && IsBusy(runtime))
                 throw new InvalidOperationException($"{pane.Name} already has a live or queued session.");
-            var profile = WorkspaceJson.Clone(pane.Profile);
-            string? error = null;
-            try
-            {
-                if (resume)
-                {
-                    if (string.IsNullOrWhiteSpace(profile.ResumeScript)) throw new InvalidDataException("No agent resume command is configured.");
-                    profile.StartupScript = profile.ResumeScript;
-                }
-                var launch = await Task.Run(() => ShellLauncher.Build(profile, pane.Id));
-                profile.Executable = launch.Executable;
-                profile.WorkingDirectory = launch.WorkingDirectory;
-            }
-            catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or Win32Exception or ArgumentException or NotSupportedException)
-            {
-                error = exception.Message;
-            }
-            launches.Add((pane, profile, error));
+            launches.Add(await PrepareLaunchAsync(pane, resume));
         }
         var preview = new StringBuilder("Review executable code before starting. Sessions use your Windows permissions; they are not sandboxes.\n");
-        foreach (var (pane, profile, error) in launches)
-        {
-            preview.AppendLine($"\n--- {pane.Name} ---\nShell: {profile.Executable}\nInitial directory: {profile.WorkingDirectory}");
-            if (error is not null) preview.AppendLine("WILL NOT START - validation failed: " + error);
-            preview.AppendLine($"User profile: {(profile.LoadUserProfile ? "loaded (also executes code)" : "not loaded")}; keep open: {profile.KeepShellOpen}");
-            if (pane.Plan.NotBefore is { } time) preview.AppendLine($"Not before: {time.ToLocalTime():g}");
-            if (pane.Plan.AfterPaneId is { } dependency)
-                preview.AppendLine("Requires a new explicit completed signal from: " + WorkspaceCommands.FindPane(_document.Workspace, dependency).Pane.Name);
-            preview.AppendLine("Environment overrides: " + (profile.Environment.Count == 0 ? "(none)" : ""));
-            foreach (var pair in profile.Environment) preview.AppendLine($"  {pair.Key}={pair.Value}");
-            preview.AppendLine("Startup script:\n" + (profile.StartupScript.Length == 0 ? "(interactive prompt)" : profile.StartupScript));
-        }
+        foreach (var (pane, profile, error) in launches) AppendLaunchPreview(preview, pane, profile, error);
         if (!Confirm($"Start {panes.Length} session(s)", preview.ToString(), "Start reviewed sessions")) return false;
+        await QueueReviewedStartsAsync(launches);
+        if (launches.All(launch => launch.Error is not null))
+            throw new InvalidOperationException("No sessions started. Launch errors are shown on the affected panes.");
+        return true;
+    }
+
+    private static async Task<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> PrepareLaunchAsync(
+        PaneDefinition pane, bool resume = false, bool recurring = false)
+    {
+        var profile = WorkspaceJson.Clone(pane.Profile);
+        if (recurring) profile.KeepShellOpen = false;
+        string? error = null;
+        try
+        {
+            if (resume)
+            {
+                if (string.IsNullOrWhiteSpace(profile.ResumeScript)) throw new InvalidDataException("No agent resume command is configured.");
+                profile.StartupScript = profile.ResumeScript;
+            }
+            var launch = await Task.Run(() => ShellLauncher.Build(profile, pane.Id));
+            profile.Executable = launch.Executable;
+            profile.WorkingDirectory = launch.WorkingDirectory;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or Win32Exception or ArgumentException or NotSupportedException)
+        {
+            error = exception.Message;
+        }
+        return (pane, profile, error);
+    }
+
+    private void AppendLaunchPreview(StringBuilder preview, PaneDefinition pane, LaunchProfile profile, string? error)
+    {
+        preview.AppendLine($"\n--- {pane.Name} ---\nShell: {profile.Executable}\nInitial directory: {profile.WorkingDirectory}");
+        if (error is not null) preview.AppendLine("WILL NOT START - validation failed: " + error);
+        preview.AppendLine($"User profile: {(profile.LoadUserProfile ? "loaded (also executes code)" : "not loaded")}; keep open: {profile.KeepShellOpen}");
+        if (pane.Plan.NotBefore is { } time) preview.AppendLine($"Not before: {time.ToLocalTime():g}");
+        if (pane.Plan.AfterPaneId is { } dependency)
+            preview.AppendLine("Requires a new explicit completed signal from: " + WorkspaceCommands.FindPane(_document.Workspace, dependency).Pane.Name);
+        preview.AppendLine("Environment overrides: " + (profile.Environment.Count == 0 ? "(none)" : ""));
+        foreach (var pair in profile.Environment) preview.AppendLine($"  {pair.Key}={pair.Value}");
+        preview.AppendLine("Startup script:\n" + (profile.StartupScript.Length == 0 ? "(interactive prompt)" : profile.StartupScript));
+    }
+
+    private async Task QueueReviewedStartsAsync(List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> launches)
+    {
         if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
         foreach (var (pane, profile, error) in launches)
         {
@@ -406,9 +449,62 @@ public partial class MainWindow : Window
                     ? prerequisite.Generation : _generations.GetValueOrDefault(dependency) + 1;
         }
         await PublishStateAsync();
-        if (launches.All(launch => launch.Error is not null))
-            throw new InvalidOperationException("No sessions started. Launch errors are shown on the affected panes.");
+    }
+
+    private async Task<bool> ArmScheduleAsync(PaneDefinition pane)
+    {
+        if (pane.Plan.Recurrence is null) throw new InvalidOperationException("Edit the pane and configure a daily, weekday or weekly recurrence first.");
+        if (string.IsNullOrWhiteSpace(pane.Profile.StartupScript))
+            throw new InvalidOperationException("A recurring task requires a startup command or script.");
+        var (_, profile, error) = await PrepareLaunchAsync(pane, recurring: true);
+        if (error is not null) throw new InvalidOperationException("Schedule was not armed: " + error);
+        var reviewed = WorkspaceJson.Clone(pane);
+        reviewed.Profile = profile;
+        var schedule = new ScheduledLaunch(reviewed, DateTimeOffset.UtcNow);
+        var recurrence = reviewed.Plan.Recurrence!;
+        var preview = new StringBuilder(
+            $"Frequency: {recurrence.Frequency}; local time: {recurrence.Time}; weekly day: {recurrence.Day}\n" +
+            $"Time zone: {TimeZoneInfo.Local.DisplayName}\nNext run: {schedule.NextRun.ToLocalTime():F}\n\n" +
+            "Runs only while this app and its renderer are available. Restarting, importing or recovering does not re-arm schedules.\n" +
+            "Each run starts a fresh shell and closes it when the startup script finishes. A live or queued pane is never interrupted; that occurrence is skipped.\n" +
+            "Occurrences missed by more than one minute are skipped, not replayed. Edits do not change this reviewed snapshot; disarm and review again to apply changes.\n");
+        AppendLaunchPreview(preview, reviewed, profile, null);
+        if (!Confirm("Arm recurring task", preview.ToString(), "Arm reviewed schedule")) return false;
+        if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
+        _schedules[pane.Id] = new ScheduledLaunch(reviewed, DateTimeOffset.UtcNow);
+        await PublishStateAsync();
         return true;
+    }
+
+    private async Task CheckSchedulesAsync()
+    {
+        foreach (var (id, schedule) in _schedules.ToArray())
+        {
+            if (_shuttingDown || !_ready) break;
+            var decision = schedule.Consume(DateTimeOffset.UtcNow,
+                _runtimes.TryGetValue(id, out var current) && IsBusy(current));
+            if (decision == ScheduledRunDecision.NotDue) continue;
+            schedule.Message = decision switch
+            {
+                ScheduledRunDecision.SkippedBusy => "Skipped: pane still has a live or queued session",
+                ScheduledRunDecision.SkippedMissed => "Skipped: occurrence was missed by more than one minute",
+                _ => "Queued reviewed recurring task"
+            };
+            if (decision == ScheduledRunDecision.Ready)
+            {
+                try
+                {
+                    await QueueReviewedStartsAsync([(schedule.Pane, WorkspaceJson.Clone(schedule.Pane.Profile), null)]);
+                }
+                catch (Exception error)
+                {
+                    schedule.Message = "Scheduled launch failed: " + error.Message;
+                    await ReportErrorAsync($"{schedule.Pane.Name}: {schedule.Message}");
+                }
+            }
+            else await PostAsync(new { type = "notice", message = $"{schedule.Pane.Name}: {schedule.Message}", error = false });
+            await PublishStateAsync();
+        }
     }
 
     private async Task CheckLaunchQueueAsync()
@@ -614,8 +710,10 @@ public partial class MainWindow : Window
 
     private async void OnTimer(object? sender, EventArgs e)
     {
+        if (_shuttingDown || !_ready || !_commands.Wait(0)) return;
         try
         {
+            await CheckSchedulesAsync();
             await CheckLaunchQueueAsync();
             if (++_ticks % 2 != 0 || !_ready) return;
             var metrics = new List<object>();
@@ -627,6 +725,7 @@ public partial class MainWindow : Window
             await PostAsync(new { type = "metrics", items = metrics });
         }
         catch (Exception error) { await ReportErrorAsync(error.Message); }
+        finally { _commands.Release(); }
     }
 
     private void ScheduleSave()
@@ -692,6 +791,8 @@ public partial class MainWindow : Window
         _maximized.Clear();
         _unread.Clear();
         ApplyHostTheme();
+        ApplyPowerPreference();
+        ScheduleSave();
         await PublishStateAsync();
         return true;
     }
@@ -793,7 +894,12 @@ public partial class MainWindow : Window
             notBefore = r.Plan.NotBefore, afterPaneId = r.Plan.AfterPaneId, dependencyGeneration = r.DependencyGeneration
         }).ToArray(),
         maximized = _maximized, unreadTabs = _unread.ToArray(), saveStatus = _saveStatus,
-        autosaveEnabled = _persistenceEnabled
+        autosaveEnabled = _persistenceEnabled, keepAwakeEnabled = _keepAwake.IsEnabled,
+        schedules = _schedules.Select(pair => new
+        {
+            paneId = pair.Key, nextRun = pair.Value.NextRun, lastRun = pair.Value.LastRun,
+            message = pair.Value.Message, recurrence = pair.Value.Pane.Plan.Recurrence
+        }).ToArray()
     });
 
     private Task ReplyAsync(BridgeRequest request, string? error = null, bool cancelled = false) =>
@@ -837,6 +943,40 @@ public partial class MainWindow : Window
             button.BorderBrush = new SolidColorBrush(_dark ? Color.FromRgb(53, 66, 92) : Color.FromRgb(189, 199, 215));
         }
         ReviewDialog.ApplyWindowTheme(this, _dark);
+    }
+
+    private void ApplyPowerPreference()
+    {
+        try { _keepAwake.SetEnabled(_document.Settings.PreventSleep); }
+        catch (Win32Exception error)
+        {
+            _document.Settings.PreventSleep = _keepAwake.IsEnabled;
+            MessageBox.Show(this, error.Message + "\nThe power preference was not applied.",
+                "Keep-awake mode failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void RestoreWindowSize()
+    {
+        Width = Math.Min(_document.MainWindow.Width, Math.Max(MinWidth, SystemParameters.WorkArea.Width));
+        Height = Math.Min(_document.MainWindow.Height, Math.Max(MinHeight, SystemParameters.WorkArea.Height));
+        if (_document.MainWindow.Maximized) WindowState = WindowState.Maximized;
+        _windowPreferencesLoaded = true;
+    }
+
+    private void CaptureWindowSize()
+    {
+        if (!_windowPreferencesLoaded || _shuttingDown || WindowState == WindowState.Minimized) return;
+        var width = WindowState == WindowState.Normal ? ActualWidth : RestoreBounds.Width;
+        var height = WindowState == WindowState.Normal ? ActualHeight : RestoreBounds.Height;
+        if (!double.IsFinite(width) || !double.IsFinite(height) || width < MinWidth || height < MinHeight) return;
+        var preferences = _document.MainWindow;
+        var maximized = WindowState == WindowState.Maximized;
+        if (preferences.Width == width && preferences.Height == height && preferences.Maximized == maximized) return;
+        preferences.Width = width;
+        preferences.Height = height;
+        preferences.Maximized = maximized;
+        ScheduleSave();
     }
 
     private void OnSystemAppearanceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -903,16 +1043,21 @@ public partial class MainWindow : Window
         catch (Exception error) { StatusDetail.Text = "Stopping sessions failed: " + error.Message; }
     }
 
-    private Task StopAllAsync() => Task.WhenAll(_runtimes.Values.Where(IsBusy).ToArray().Select(StopRuntimeAsync));
+    private Task StopAllAsync()
+    {
+        _schedules.Clear();
+        return Task.WhenAll(_runtimes.Values.Where(IsBusy).ToArray().Select(StopRuntimeAsync));
+    }
 
     private async void OnClosing(object? sender, CancelEventArgs e)
     {
         if (_allowClose) return;
         e.Cancel = true;
         if (_shuttingDown) return;
-        if (BusyCount > 0 && !Confirm("Close Prompt Terminal",
+        if ((BusyCount > 0 || _schedules.Count > 0) && !Confirm("Close Prompt Terminal",
                 $"Closing stops {BusyCount} live or queued session(s) and their owned process trees.\n\n" +
-                "Use Interrupt first if an agent needs a chance to finish. Cancel leaves all sessions running.", "Close and stop")) return;
+                $"It also disarms {_schedules.Count} recurring schedule(s). Use Interrupt first if an agent needs a chance to finish. Cancel leaves all sessions running.", "Close and stop")) return;
+        CaptureWindowSize();
         _shuttingDown = true;
         _timer.Stop();
         try
@@ -921,6 +1066,7 @@ public partial class MainWindow : Window
             _saveDelay?.Cancel();
             await _saveTask;
             if (_persistenceEnabled) await _store.SaveAsync(_document);
+            _keepAwake.Dispose();
             SystemEvents.UserPreferenceChanged -= OnSystemAppearanceChanged;
             _ready = false;
             _activeCore = null;

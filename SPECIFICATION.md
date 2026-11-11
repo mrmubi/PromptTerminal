@@ -94,6 +94,9 @@ worktrees for agents making independent changes.
 - Temporarily maximize a pane, then restore its previous position and size.
 - Preserve terminal focus and process identity during layout changes.
 - Keep floating title bars reachable after window resizing or DPI changes.
+- Default new panes to the current floating format when present, preserving
+  panel size and placing them alongside; otherwise inherit tiled split
+  direction. Explicit floating/tiled and right/below choices remain available.
 - Apply minimum usable pane dimensions. When the available area is insufficient,
   provide workspace scrolling or a clear layout adjustment rather than hiding
   panels or shrinking terminals to zero.
@@ -200,6 +203,8 @@ require explicit integrations or launch wrappers, introduced separately.
 - Warn before closing the application while sessions are running.
 - On reopening after a crash, restore the saved layout and clearly label its
   sessions as not started.
+- Remember main-window normal size and maximized state in logical pixels,
+  constrained to the current work area; minimizing must not overwrite them.
 
 Persistence restores configuration, not a live process, PowerShell variables,
 agent memory, or an authenticated connection. Agent resume commands can be
@@ -270,7 +275,8 @@ restart agents or claim that the terminal was restored without restoring its sta
 | P1 | Git branch and directory indicators | Report live values only when shell integration is available; otherwise label the initial directory. |
 | P2 | Broadcast input | Explicitly select recipients, show a persistent warning, and require a deliberate send action. |
 | P2 | Agent-specific integrations | Show waiting-for-approval, task completion, and resume options when supported. |
-| P2 | Scheduled and dependent startup | Start tests or other commands after explicit prerequisite signals; do not infer dependencies from silence. |
+| P2 | Scheduled and dependent startup | Reviewed daily/weekday/weekly local-time recurrence and explicit prerequisite signals; skip busy/missed runs; never auto-arm restored schedules. |
+| P2 | App-only keep-awake | Opt-in idle sleep/hibernate prevention while open; release on exit without modifying Windows power configuration. |
 | P2 | CPU and memory indicators | Identify expensive sessions, with clear limits on process-tree attribution. |
 | P2 | Read-only monitoring mode | Prevent accidental typing into selected sessions. |
 | P2 | Detached workspace windows | Move tabs into separate application windows without losing sessions. |
@@ -342,13 +348,14 @@ Use versioned JSON with validation and explicit schema migration.
 
 | Entity | Key persisted information |
 |---|---|
-| Application settings | Theme preference (`dark`, `light`, or `system`), font, shortcuts, scrollback limit, shell defaults. |
+| Application settings | Theme preference (`dark`, `light`, or `system`), font, shortcuts, scrollback limit, shell defaults, app-only keep-awake preference. |
+| Main window | Normal logical width/height and maximized state, separate from renderer settings. |
 | Launch profile | Shell, initial directory, startup script, non-secret environment overrides, shell flags. |
 | Workspace | Schema version, tabs, selected tab, referenced or snapshotted launch settings. |
 | Tab | Stable ID, name, color, tiled layout root, ordered floating-pane collection. |
 | Split node | Orientation, split ratio, two children; leaves reference pane IDs. |
 | Floating placement | Pane ID, logical bounds, z-order. |
-| Pane | Stable ID, name, color, resolved launch configuration, placement membership. |
+| Pane | Stable ID, name, color, resolved launch configuration, placement membership, optional daily/weekday/weekly recurrence and local time/day. |
 
 A pane belongs to exactly one tab and either one tiled leaf or one floating
 placement, never both. Reject duplicate IDs, invalid split ratios, orphaned
@@ -359,6 +366,15 @@ Reconcile saved bounds with the current viewport during restore.
 
 Do not persist process IDs, native handles, live-state flags, or runtime
 credentials as launchable state.
+
+Recurring approvals, reviewed snapshots and next-run/status information are
+runtime-only. Users explicitly review and arm each schedule per app session.
+Each run uses its approved snapshot in a fresh shell that closes after its
+startup script; live/queued panes are skipped rather than interrupted.
+Occurrences missed by more than one minute are not replayed. DST gaps are
+skipped and ambiguous local times execute once. Import, recovery, shutdown and
+Stop disarm applicable schedules. A renderer outage pauses scheduling and uses
+the same missed-run rule on recovery.
 
 Illustrative launch profile, assuming the CLI is installed and authenticated:
 

@@ -9,7 +9,7 @@ function documentFixture(tabCount = 2, panesPerTab = 2) {
   const tabs = Array.from({ length: tabCount }, (_, tabIndex) => {
     const panes = Array.from({ length: panesPerTab }, (_, paneIndex) => ({
       id: randomUUID(), name: `Agent ${tabIndex + 1}.${paneIndex + 1}`, profile: { ...profile, id: randomUUID() },
-      readOnly: false, plan: { notBefore: null, afterPaneId: null }
+      readOnly: false, plan: { notBefore: null, afterPaneId: null, recurrence: null }
     }));
     let root = { id: randomUUID(), paneId: panes[0].id, axis: "horizontal", ratio: .5, first: null, second: null };
     for (const pane of panes.slice(1))
@@ -19,7 +19,8 @@ function documentFixture(tabCount = 2, panesPerTab = 2) {
   });
   return {
     schemaVersion: 1, workspace: { schemaVersion: 1, tabs, activeTabId: tabs[0].id },
-    settings: { theme: "dark", fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 10000, screenReaderMode: false, shortcuts: {
+    mainWindow: { width: 1450, height: 900, maximized: false },
+    settings: { theme: "dark", fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 10000, screenReaderMode: false, preventSleep: false, shortcuts: {
       newTab: "Ctrl+Shift+T", newPane: "Ctrl+Shift+N", splitHorizontal: "Ctrl+Shift+H", splitVertical: "Ctrl+Shift+J",
       nextTab: "Ctrl+Tab", previousTab: "Ctrl+Shift+Tab", nextPane: "Alt+ArrowRight", previousPane: "Alt+ArrowLeft",
       maximize: "Ctrl+Shift+M", toggleFloat: "Ctrl+Shift+F", palette: "Ctrl+Shift+P", search: "Ctrl+Shift+S"
@@ -33,7 +34,8 @@ async function installMockHost(page, document) {
     const listeners = [];
     const snapshot = {
       type: "state", document, resolvedTheme: document.settings.theme === "light" ? "light" : "dark",
-      runtimes: [], maximized: {}, unreadTabs: [], saveStatus: "Saved locally", autosaveEnabled: true
+      runtimes: [], schedules: [], keepAwakeEnabled: !!document.settings.preventSleep,
+      maximized: {}, unreadTabs: [], saveStatus: "Saved locally", autosaveEnabled: true
     };
     const fixture = {
       snapshot, messages: [],
@@ -60,6 +62,7 @@ async function installMockHost(page, document) {
           if (message.type === "settings") {
             document.settings = message.data;
             snapshot.resolvedTheme = message.data.theme === "light" ? "light" : "dark";
+            snapshot.keepAwakeEnabled = message.data.preventSleep;
             fixture.publish();
           }
           if (message.type === "selectTab") {
@@ -75,6 +78,23 @@ async function installMockHost(page, document) {
           if (message.type === "floatingBounds") {
             const tab = document.workspace.tabs.find(tab => tab.floating.some(item => item.paneId === message.data.paneId));
             Object.assign(tab.floating.find(item => item.paneId === message.data.paneId), message.data);
+            fixture.publish();
+          }
+          if (message.type === "editPane") {
+            const pane = document.workspace.tabs.flatMap(tab => tab.panes).find(pane => pane.id === message.data.paneId);
+            Object.assign(pane, message.data);
+            delete pane.paneId;
+            fixture.publish();
+          }
+          if (message.type === "armSchedule") {
+            const pane = document.workspace.tabs.flatMap(tab => tab.panes).find(pane => pane.id === message.data.paneId);
+            snapshot.schedules = snapshot.schedules.filter(item => item.paneId !== pane.id);
+            snapshot.schedules.push({ paneId: pane.id, nextRun: "2026-11-12T09:00:00Z",
+              lastRun: null, message: "Armed for this app session", recurrence: structuredClone(pane.plan.recurrence) });
+            fixture.publish();
+          }
+          if (message.type === "cancelSchedule") {
+            snapshot.schedules = snapshot.schedules.filter(item => item.paneId !== message.data.paneId);
             fixture.publish();
           }
           fixture.emit({ type: "result", id: message.id, ok: true, cancelled: false, error: null });

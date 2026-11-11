@@ -59,6 +59,8 @@ never silently replaced by another shell.
 - Workspace templates, prompt snippets, command palette, Git worktree creation,
   explicit integration notifications, scheduled/dependent startup, deliberate
   broadcast input and shell-host CPU/memory indicators.
+- Opt-in keep-awake mode; reviewed daily, weekday and weekly agent tasks;
+  inherited pane placement and remembered main-window size/maximized state.
 
 Floating title bars are clamped to reachable positions after a viewport change.
 Large tiled layouts scroll rather than shrinking terminals below usable bounds.
@@ -67,8 +69,16 @@ configuration. Use **Tab options** to rename, color, reorder or duplicate a tab.
 Alt+drag a floating title bar over a tiled pane to preview docking, or use its
 **Dock with placement preview** action.
 
+New panes default to the existing presentation: when a floating panel exists,
+the new panel copies its size and is placed beside it (preferring the active
+floating panel). Uncheck **Create as floating panel** for a deliberate tiled
+pane. Tiled additions inherit the target's split direction; explicit **Split
+right / below** still creates a tiled split. Window size is saved in logical
+pixels, with normal restore dimensions retained when maximized or minimized.
+Restored dimensions are constrained to the current Windows work area.
+
 Launch/profile/plan edits apply to future launches, not existing processes or an
-already reviewed queued launch. Cancel and re-arm a queued launch to apply edits.
+already reviewed queued launch or armed schedule. Cancel and re-arm to apply edits.
 Read-only mode takes effect immediately and also blocks interrupts; Stop remains
 available. Clear View changes only the display, not an agent conversation.
 
@@ -103,6 +113,40 @@ Agent-specific resume commands run only through the explicit Resume action.
 They do not restore process memory, authentication or an agent conversation
 unless the chosen CLI implements that behavior.
 
+## Keep-awake and recurring tasks
+
+In **Settings**, enable **Prevent automatic sleep / hibernation while app is
+open** to let long-running agents continue through Windows idle time. This
+app-only Windows power request needs no administrator rights, does not alter
+system hibernation settings, and is released on exit. The display can still turn
+off. Explicit sleep/hibernate, shutdown, lid and critical-battery policies can
+still suspend or stop work; this is not an unconditional 24/7 guarantee.
+
+To schedule an agent:
+
+1. Edit its pane and enter the actual CLI command/script.
+2. Select **Daily**, **Weekdays (Mon-Fri)** or **Weekly**, a local time and, for
+   weekly tasks, a day. The optional earliest launch time remains a lower bound.
+3. Open **Schedules** or pane actions and **Review and arm** the native launch
+   preview. Merely saving a recurrence does not execute or arm it.
+
+Each occurrence starts a fresh shell with the reviewed script, environment and
+working directory. Scheduled shells close when their startup script finishes,
+regardless of the pane's manual **Keep shell open** preference. Existing live or
+queued sessions are never stopped to make room: that occurrence is skipped
+visibly. Dependencies still require their expected explicit completion signal.
+Run noninteractive agent commands for unattended work; authentication, approval
+or input prompts can keep a task alive and cause later occurrences to skip.
+
+Schedules run only while this app and its renderer are available. They are
+runtime-only approvals: reopening, importing or recovering configuration never
+re-arms them. Disarm/review again to apply edits to an approved snapshot.
+Disarming leaves an already running occurrence alone; **Stop** also disarms
+future runs. An occurrence missed by more than one minute is skipped, without
+catch-up bursts. Local daylight-saving gaps are skipped; repeated wall-clock
+times run once per date. Next run and skipped/queued status appear in
+**Schedules** and pane footers.
+
 ## Keyboard defaults
 
 | Action | Shortcut |
@@ -130,7 +174,9 @@ combination.
 Configuration is stored in `%LOCALAPPDATA%\PromptTerminal\workspace.json`;
 `workspace.json.bak` retains the previous save. Layout, profiles, snippets,
 templates and settings are persisted; process IDs, native handles, live state and
-session generations are not.
+session generations are not. Main-window restore size/maximized state and
+recurrence definitions are saved; armed approvals and next-run runtime state are
+not.
 
 Configuration is **plain text**, not a credential store. Scripts, snippets and
 environment overrides can contain secrets: do not put credentials in them.
@@ -185,11 +231,16 @@ npm run test:desktop
 npm run test:desktop -- .\artifacts\publish\win-x64\PromptTerminal.App.exe
 ```
 
+For just the keep-awake, recurring-task, inherited-placement and window-restore
+desktop checks, append `--features-only` (an executable path is optional).
+
 The browser tests use locally installed Microsoft Edge. The desktop smoke test
 requires an interactive Windows desktop and the Debug build. It checks twelve
 real concurrent sessions, focused input, Unicode, live layout/theme changes,
 restart generation rejection, explicit dependencies, renderer recovery,
-partial failures and stopped restore. It temporarily enables **loopback-only**
+partial failures, real recurring launches/busy skips, keep-awake toggling,
+inherited floating placement, window-size restore and stopped/unarmed restore.
+It temporarily enables **loopback-only**
 WebView2 debugging for that test process; normal launches do not enable it.
 It can briefly run thirteen shells, so allow sufficient resources.
 

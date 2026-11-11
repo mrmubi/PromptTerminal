@@ -11,7 +11,8 @@ const { documentFixture } = require("./mock-host.cjs");
 
 const execute = promisify(execFile);
 const root = path.resolve(__dirname, "..", "..");
-const executable = process.argv[2] ? path.resolve(process.argv[2])
+const targetExecutable = process.argv.slice(2).find(argument => argument !== "--features-only");
+const executable = targetExecutable ? path.resolve(targetExecutable)
   : path.join(root, "src", "PromptTerminal.App", "bin", "Debug", "net10.0-windows", "PromptTerminal.App.exe");
 const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const quote = value => `'${value.replaceAll("'", "''")}'`;
@@ -254,9 +255,130 @@ async function waitForExit() {
   });
 }
 
+async function windowGeometry(mode = "", resize = false) {
+  return JSON.parse(await ps(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class FeatureWindow {
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr window, int x, int y, int width, int height, bool repaint);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr window);
+}
+'@
+$handle = (Get-Process -Id ${application.pid}).MainWindowHandle
+${mode ? `[FeatureWindow]::ShowWindow($handle, ${mode === "maximize" ? 3 : 9}) | Out-Null` : ""}
+${resize ? "if (-not [FeatureWindow]::MoveWindow($handle, 20, 20, 1120, 740, $true)) { throw 'Resize failed.' }" : ""}
+Start-Sleep -Milliseconds 250
+$rect = [FeatureWindow+Rect]::new()
+if (-not [FeatureWindow]::GetWindowRect($handle, [ref]$rect)) { throw 'Window bounds could not be read.' }
+@{ width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top;
+   dpi = [FeatureWindow]::GetDpiForWindow($handle); maximized = [FeatureWindow]::IsZoomed($handle) } | ConvertTo-Json -Compress
+`));
+}
+
+async function runAutomationFeatures(port) {
+  const fixture = documentFixture(1, 2);
+  const [scheduled, busy] = fixture.workspace.tabs[0].panes;
+  scheduled.name = "Recurring smoke";
+  busy.name = "Busy recurring smoke";
+  scheduled.profile.startupScript = "[Console]::WriteLine('SCHEDULE-REVIEWED-RUN')";
+  busy.profile.startupScript = "[Console]::WriteLine('BUSY-INTERACTIVE')";
+  for (const pane of [scheduled, busy]) {
+    pane.profile.workingDirectory = root;
+    pane.plan.recurrence = { frequency: "daily", time: "09:00:00", day: "monday" };
+  }
+  fixture.profiles[0].workingDirectory = root;
+  await fs.writeFile(path.join(dataDirectory, "workspace.json"), JSON.stringify(fixture));
+  let page = await startApplication(port);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), 2);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 2);
+
+  for (const enabled of [true, false, true]) {
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByLabel("Prevent automatic sleep / hibernation while app is open").setChecked(enabled);
+    await page.getByRole("button", { name: "Apply settings", exact: true }).click();
+    await page.waitForFunction(text => document.querySelector("#power-status").textContent === text,
+      enabled ? "Keep-awake on" : "Sleep allowed");
+  }
+  console.log("PASS: native keep-awake can be enabled and disabled without administrator or system power changes");
+
+  await page.locator(`[data-pane-id="${scheduled.id}"]`).getByRole("button", { name: /Float or dock/ }).click();
+  await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+  assert.equal(await page.getByLabel("Create as floating panel").isChecked(), true);
+  await page.getByLabel("Pane name", { exact: true }).fill("Inherited floating smoke");
+  await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll(".pane.floating").length === 2);
+  assert.equal(await page.locator(".pane.floating").count(), 2);
+
+  await page.getByRole("button", { name: "Start pane Busy recurring smoke", exact: true }).click();
+  await nativeButton("Start 1 session(s)", "Start reviewed sessions");
+  await waitOutput(page, busy.id, "BUSY-INTERACTIVE");
+  const busyPid = await processId(page, busy.id);
+  const due = new Date(Date.now() + 35000);
+  const time = [due.getHours(), due.getMinutes(), due.getSeconds()].map(value => String(value).padStart(2, "0")).join(":");
+  for (const pane of [scheduled, busy]) {
+    await paneAction(page, pane.id, "Edit launch configuration...");
+    await page.getByLabel("Recurring local time", { exact: true }).fill(time);
+    await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+    await paneAction(page, pane.id, "Review and arm recurring task...");
+    await nativeButton("Arm recurring task", "Arm reviewed schedule");
+  }
+  await paneAction(page, scheduled.id, "Edit launch configuration...");
+  await page.getByLabel("Startup command or multiline PowerShell script").fill("[Console]::WriteLine('UNREVIEWED-MUST-NOT-RUN')");
+  await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+  await page.waitForSelector(`.pane[data-pane-id="${scheduled.id}"][data-state="exited"]`, { timeout: 75000 });
+  await waitOutput(page, scheduled.id, "SCHEDULE-REVIEWED-RUN");
+  assert.doesNotMatch(await page.locator(`[data-pane-id="${scheduled.id}"] .xterm-screen`).textContent(), /UNREVIEWED-MUST-NOT-RUN/);
+  await page.waitForFunction(id => document.querySelector(`[data-pane-id="${id}"] .pane-schedule`)?.title.includes("Skipped: pane still has"), busy.id);
+  assert.equal(await processId(page, busy.id), busyPid);
+  console.log("PASS: real recurring task executes the reviewed snapshot, exits its shell, and skips a live pane without interruption");
+
+  const normal = await windowGeometry("restore", true);
+  await windowGeometry("maximize");
+  await page.locator(".header-actions summary").click();
+  await page.getByRole("button", { name: "Save now", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("#save-status").textContent === "Saved locally");
+  const saved = JSON.parse(await fs.readFile(path.join(dataDirectory, "workspace.json"), "utf8"));
+  const originalBounds = saved.workspace.tabs[0].floating.find(item => item.paneId === scheduled.id);
+  const inherited = saved.workspace.tabs[0].floating.find(item => item.paneId !== scheduled.id);
+  assert.equal(inherited.width, originalBounds.width);
+  assert.equal(inherited.height, originalBounds.height);
+  assert.equal(inherited.x, originalBounds.x + originalBounds.width + 12);
+  assert.equal(inherited.y, originalBounds.y);
+  assert.ok(Math.abs(saved.mainWindow.width - normal.width * 96 / normal.dpi) < 3);
+  assert.ok(Math.abs(saved.mainWindow.height - normal.height * 96 / normal.dpi) < 3);
+  assert.equal(saved.mainWindow.maximized, true);
+  assert.equal(saved.settings.preventSleep, true);
+  assert.equal(JSON.stringify(saved).includes("nextRun"), false);
+  await closeApplication();
+  await nativeButton("Close Prompt Terminal", "Close and stop");
+  await waitForExit();
+
+  page = await startApplication(port);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), 3);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 2);
+  assert.equal(await page.locator("#power-status").innerText(), "Keep-awake on");
+  assert.equal((await windowGeometry()).maximized, true);
+  const restored = await windowGeometry("restore");
+  assert.ok(Math.abs(restored.width - normal.width) < 4, "Normal window width is restored after maximization");
+  assert.ok(Math.abs(restored.height - normal.height) < 4, "Normal window height is restored after maximization");
+  console.log("PASS: inherited floating placement, power preference and normal/maximized window size persist; schedules never auto-arm on reopen");
+  await closeApplication();
+  await waitForExit();
+}
+
 async function run() {
   await fs.access(executable);
   dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "PromptTerminal-smoke-"));
+  if (process.argv.includes("--features-only")) {
+    await runAutomationFeatures(await freePort());
+    assert.deepEqual(rendererErrors, []);
+    return;
+  }
   const fixture = documentFixture(3, 4);
   const initialPaneCount = fixture.workspace.tabs.flatMap(tab => tab.panes).length;
   fixture.settings.theme = "dark";
@@ -426,6 +548,7 @@ async function run() {
   await closeApplication();
   await nativeButton("Close Prompt Terminal", "Close and stop");
   await waitForExit();
+  await runAutomationFeatures(port);
   assert.deepEqual(rendererErrors, []);
 }
 

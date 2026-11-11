@@ -226,6 +226,82 @@ test("rapid tab selection followed by Start targets the newly selected workspace
     assert.equal(target, tabId);
   });
 });
+
+test("keep-awake is opt-in, can be disabled, and preserves live terminal instances", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    await page.evaluate(id => {
+      window.__host.running();
+      window.__powerTerminal = document.querySelector(`[data-pane-id="${id}"] .xterm`);
+    }, id);
+    assert.equal(await page.locator("#power-status").innerText(), "Sleep allowed");
+    for (const enabled of [true, false]) {
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByLabel("Prevent automatic sleep / hibernation while app is open").setChecked(enabled);
+      await page.getByRole("button", { name: "Apply settings", exact: true }).click();
+      assert.equal(await page.locator("#power-status").innerText(), enabled ? "Keep-awake on" : "Sleep allowed");
+      assert.equal(await page.evaluate(() => window.__host.snapshot.document.settings.preventSleep), enabled);
+    }
+    assert.equal(await page.evaluate(id =>
+      window.__powerTerminal === document.querySelector(`[data-pane-id="${id}"] .xterm`), id), true);
+  });
+});
+
+test("new panes default to the existing floating format and allow a deliberate tiled override", async () => {
+  const fixture = documentFixture(1, 2);
+  const tab = fixture.workspace.tabs[0];
+  const floating = tab.panes[0].id;
+  tab.root = tab.root.second;
+  tab.floating.push({ paneId: floating, x: 25, y: 60, width: 640, height: 420, z: 1 });
+  tab.activePaneId = tab.panes[1].id;
+  await withPage(async page => {
+    for (const desired of [true, false]) {
+      await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+      assert.equal(await page.getByLabel("Create as floating panel").isChecked(), true);
+      await page.getByLabel("Create as floating panel").setChecked(desired);
+      await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+      const request = await page.evaluate(() => window.__host.messages.filter(message => message.type === "addPane").at(-1));
+      assert.equal(request.data.floating, desired);
+      assert.equal(request.data.axis, null);
+      assert.equal(request.data.pane.plan.recurrence, null);
+    }
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message =>
+      ["startPane", "armSchedule"].includes(message.type))), false);
+  }, fixture);
+});
+
+test("daily and weekly schedules are configured without execution and must be explicitly armed or disarmed", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    await page.locator(`[data-pane-id="${id}"] .pane-name`).click();
+    assert.equal(await page.getByLabel("Recurring local time", { exact: true }).isDisabled(), true);
+    await page.getByLabel("Startup command or multiline PowerShell script").fill("agent run 'Daily review'");
+    await page.getByLabel("Recurring task", { exact: true }).selectOption("daily");
+    await page.getByLabel("Recurring local time", { exact: true }).fill("09:35");
+    assert.equal(await page.getByLabel("Weekly day", { exact: true }).isDisabled(), true);
+    await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+    const daily = await page.evaluate(() => window.__host.messages.filter(message => message.type === "editPane").at(-1).data.plan.recurrence);
+    assert.deepEqual(daily, { frequency: "daily", time: "09:35:00", day: "monday" });
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message =>
+      ["startPane", "armSchedule"].includes(message.type))), false);
+    await page.getByRole("button", { name: "Schedules", exact: true }).click();
+    assert.match(await page.locator("#dialog-body").innerText(), /Daily at 09:35:00.*local time/);
+    await page.getByRole("button", { name: "Review and arm", exact: true }).click();
+    await page.waitForFunction(() => window.__host.snapshot.schedules.length === 1);
+    assert.match(await page.locator("#dialog-body").innerText(), /Armed for this app session/);
+    await page.getByRole("button", { name: "Disarm schedule", exact: true }).click();
+    assert.match(await page.locator("#dialog-body").innerText(), /Not armed/);
+    await page.getByRole("button", { name: "Configure", exact: true }).click();
+    await page.getByLabel("Recurring task", { exact: true }).selectOption("weekly");
+    await page.getByLabel("Weekly day", { exact: true }).selectOption("friday");
+    await page.getByLabel("Recurring local time", { exact: true }).fill("14:20:30");
+    await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+    const weekly = await page.evaluate(() => window.__host.messages.filter(message => message.type === "editPane").at(-1).data.plan.recurrence);
+    assert.deepEqual(weekly, { frequency: "weekly", time: "14:20:30", day: "friday" });
+    assert.equal(await page.locator(`[data-pane-id="${id}"] .pane-schedule`).innerText(), "Schedule not armed");
+  });
+});
+
 test("broadcast starts with no recipients, and snippets require an explicit single-pane paste", async () => {
   await withPage(async (page, fixture) => {
     await page.evaluate(() => window.__host.running());

@@ -11,6 +11,10 @@ public static partial class WorkspaceValidator
         Require(document.SchemaVersion == 1, "Unsupported application schema version.");
         Require(document.Settings is not null, "Settings are required.");
         Validate(document.Settings!);
+        Require(document.MainWindow is not null, "Main window preferences are required.");
+        Require(double.IsFinite(document.MainWindow!.Width) && double.IsFinite(document.MainWindow.Height) &&
+                document.MainWindow.Width is >= 820 and <= 100_000 &&
+                document.MainWindow.Height is >= 540 and <= 100_000, "Invalid main window size.");
         Require(document.Profiles is not null && document.Snippets is not null && document.Templates is not null,
             "Profiles, snippets, and templates must be arrays.");
         Validate(document.Workspace);
@@ -77,6 +81,12 @@ public static partial class WorkspaceValidator
         }
     }
 
+    public static void Validate(RecurringSchedule schedule)
+    {
+        Require(Enum.IsDefined(schedule.Frequency), "Invalid schedule frequency.");
+        Require(Enum.IsDefined(schedule.Day), "Invalid weekly schedule day.");
+    }
+
     public static void Validate(WorkspaceDocument workspace)
     {
         Require(workspace is not null && workspace.SchemaVersion == 1, "Unsupported workspace schema version.");
@@ -98,6 +108,7 @@ public static partial class WorkspaceValidator
                 Require(!string.IsNullOrWhiteSpace(pane.Name) && pane.Name.Length <= 100, "Invalid pane name.");
                 Validate(pane.Profile);
                 Require(pane.Plan is not null, "A launch plan is required.");
+                if (pane.Plan.Recurrence is { } recurrence) Validate(recurrence);
             }
             Require(tab.ActivePaneId is null || tabIds.Contains(tab.ActivePaneId.Value), "Invalid active pane.");
             var placements = new HashSet<Guid>();

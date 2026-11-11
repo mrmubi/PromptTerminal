@@ -13,6 +13,7 @@ public sealed class AppSettings
     public int FontSize { get; set; } = 14;
     public int Scrollback { get; set; } = 10_000;
     public bool ScreenReaderMode { get; set; }
+    public bool PreventSleep { get; set; }
     public Dictionary<string, string> Shortcuts { get; set; } = new()
     {
         ["newTab"] = "Ctrl+Shift+T",
@@ -50,6 +51,14 @@ public sealed class LaunchPlan
 {
     public DateTimeOffset? NotBefore { get; set; }
     public Guid? AfterPaneId { get; set; }
+    public RecurringSchedule? Recurrence { get; set; }
+}
+
+public sealed class MainWindowPreferences
+{
+    public double Width { get; set; } = 1450;
+    public double Height { get; set; } = 900;
+    public bool Maximized { get; set; }
 }
 
 public sealed class PaneDefinition
@@ -131,6 +140,7 @@ public sealed class ApplicationDocument
     [JsonRequired]
     public WorkspaceDocument Workspace { get; set; } = new();
     public AppSettings Settings { get; set; } = new();
+    public MainWindowPreferences MainWindow { get; set; } = new();
     public List<LaunchProfile> Profiles { get; set; } = [];
     public List<PromptSnippet> Snippets { get; set; } = [];
     public List<TabTemplate> Templates { get; set; } = [];

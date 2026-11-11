@@ -11,17 +11,22 @@ public static class WorkspaceLayout
     }
 
     public static void AddPane(WorkspaceTab tab, PaneDefinition pane, Guid? target = null,
-        SplitAxis axis = SplitAxis.Horizontal, bool floating = false, bool before = false)
+        SplitAxis? axis = null, bool? floating = null, bool before = false)
     {
         if (tab.Panes.Any(p => p.Id == pane.Id)) throw new InvalidOperationException("The pane already belongs to this tab.");
         if (target is not null && !tab.Panes.Any(p => p.Id == target)) throw new InvalidOperationException("The target pane does not exist.");
-        if (floating)
+        target ??= tab.ActivePaneId;
+        var neighbor = tab.Floating.SingleOrDefault(f => f.PaneId == target)
+            ?? tab.Floating.OrderBy(f => f.Z).LastOrDefault();
+        if (floating ?? neighbor is not null)
         {
             tab.Floating.Add(new FloatingPane
             {
                 PaneId = pane.Id,
-                X = 40 + tab.Floating.Count * 24,
-                Y = 40 + tab.Floating.Count * 24,
+                X = neighbor is null ? 40 : Math.Min(100_000, neighbor.X + neighbor.Width + 12),
+                Y = neighbor?.Y ?? 40,
+                Width = neighbor?.Width ?? 600,
+                Height = neighbor?.Height ?? 360,
                 Z = tab.Floating.Select(f => f.Z).DefaultIfEmpty(0).Max() + 1
             });
         }
@@ -35,7 +40,8 @@ public static class WorkspaceLayout
                 targetNode ??= FirstLeaf(tab.Root);
                 var oldLeaf = LayoutNode.Leaf(targetNode.PaneId!.Value);
                 targetNode.PaneId = null;
-                targetNode.Axis = axis;
+                var inheritedAxis = FindParent(tab.Root, targetNode.Id)?.Axis ?? SplitAxis.Horizontal;
+                targetNode.Axis = axis ?? inheritedAxis;
                 targetNode.Ratio = 0.5;
                 targetNode.First = before ? leaf : oldLeaf;
                 targetNode.Second = before ? oldLeaf : leaf;
@@ -113,6 +119,9 @@ public static class WorkspaceLayout
     private static LayoutNode? FindLeaf(LayoutNode? node, Guid id) =>
         node is null ? null : node.PaneId == id ? node : FindLeaf(node.First, id) ?? FindLeaf(node.Second, id);
     private static LayoutNode FirstLeaf(LayoutNode node) => node.PaneId is not null ? node : FirstLeaf(node.First!);
+    private static LayoutNode? FindParent(LayoutNode? node, Guid id) =>
+        node is null ? null : node.First?.Id == id || node.Second?.Id == id ? node
+            : FindParent(node.First, id) ?? FindParent(node.Second, id);
 
     private static LayoutNode? RemoveNode(LayoutNode? node, Guid id)
     {
