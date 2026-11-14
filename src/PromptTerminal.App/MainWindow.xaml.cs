@@ -217,6 +217,27 @@ public partial class MainWindow : Window
     {
         switch (request.Type)
         {
+            case "addStartedPane":
+            {
+                var options = request.Read<PaneCreation>();
+                var updated = WorkspaceCommands.Apply(_document, request with { Type = "addPane" });
+                var tab = WorkspaceCommands.FindTab(updated.Workspace, options.TabId);
+                var pane = tab.Panes.Single(p => p.Id == tab.ActivePaneId);
+                var launch = await PrepareLaunchAsync(pane);
+                if (launch.Error is not null)
+                    throw new InvalidOperationException("The pane was not added or started: " + launch.Error);
+                var preview = new StringBuilder("Review executable code before adding and starting this pane. " +
+                    "Sessions use your Windows permissions; they are not sandboxes.\n" +
+                    "Only this new pane will start. Any configured recurrence remains unarmed.\n");
+                AppendLaunchPreview(preview, pane, launch.Profile, null);
+                if (!Confirm("Add and start pane", preview.ToString(), "Add and start reviewed pane")) return false;
+                if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
+                updated.MainWindow = _document.MainWindow;
+                _document = updated;
+                ScheduleSave();
+                await QueueReviewedStartsAsync([launch]);
+                return true;
+            }
             case "startPane":
             case "resumePane":
             case "restartPane":
@@ -389,10 +410,10 @@ public partial class MainWindow : Window
     }
 
     private static async Task<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> PrepareLaunchAsync(
-        PaneDefinition pane, bool resume = false, bool recurring = false)
+        PaneDefinition pane, bool resume = false)
     {
         var profile = WorkspaceJson.Clone(pane.Profile);
-        if (recurring) profile.KeepShellOpen = false;
+        if (pane.Plan.Recurrence is not null) profile.KeepShellOpen = false;
         string? error = null;
         try
         {
@@ -417,6 +438,8 @@ public partial class MainWindow : Window
         preview.AppendLine($"\n--- {pane.Name} ---\nShell: {profile.Executable}\nInitial directory: {profile.WorkingDirectory}");
         if (error is not null) preview.AppendLine("WILL NOT START - validation failed: " + error);
         preview.AppendLine($"User profile: {(profile.LoadUserProfile ? "loaded (also executes code)" : "not loaded")}; keep open: {profile.KeepShellOpen}");
+        if (pane.Plan.Recurrence is not null)
+            preview.AppendLine("Recurring pane: the shell closes when its command finishes, including manual starts. Manual starts do not arm the schedule.");
         if (pane.Plan.NotBefore is { } time) preview.AppendLine($"Not before: {time.ToLocalTime():g}");
         if (pane.Plan.AfterPaneId is { } dependency)
             preview.AppendLine("Requires a new explicit completed signal from: " + WorkspaceCommands.FindPane(_document.Workspace, dependency).Pane.Name);
@@ -453,17 +476,20 @@ public partial class MainWindow : Window
 
     private async Task<bool> ArmScheduleAsync(PaneDefinition pane)
     {
-        if (pane.Plan.Recurrence is null) throw new InvalidOperationException("Edit the pane and configure a daily, weekday or weekly recurrence first.");
+        if (pane.Plan.Recurrence is null) throw new InvalidOperationException("Edit the pane and configure an hourly, daily, weekday or weekly recurrence first.");
         if (string.IsNullOrWhiteSpace(pane.Profile.StartupScript))
             throw new InvalidOperationException("A recurring task requires a startup command or script.");
-        var (_, profile, error) = await PrepareLaunchAsync(pane, recurring: true);
+        var (_, profile, error) = await PrepareLaunchAsync(pane);
         if (error is not null) throw new InvalidOperationException("Schedule was not armed: " + error);
         var reviewed = WorkspaceJson.Clone(pane);
         reviewed.Profile = profile;
         var schedule = new ScheduledLaunch(reviewed, DateTimeOffset.UtcNow);
         var recurrence = reviewed.Plan.Recurrence!;
+        var timing = recurrence.Frequency == ScheduleFrequency.Hourly
+            ? "At the top of every local hour (:00)"
+            : $"Local time: {recurrence.Time}; weekly day: {recurrence.Day}";
         var preview = new StringBuilder(
-            $"Frequency: {recurrence.Frequency}; local time: {recurrence.Time}; weekly day: {recurrence.Day}\n" +
+            $"Frequency: {recurrence.Frequency}; {timing}\n" +
             $"Time zone: {TimeZoneInfo.Local.DisplayName}\nNext run: {schedule.NextRun.ToLocalTime():F}\n\n" +
             "Runs only while this app and its renderer are available. Restarting, importing or recovering does not re-arm schedules.\n" +
             "Each run starts a fresh shell and closes it when the startup script finishes. A live or queued pane is never interrupted; that occurrence is skipped.\n" +

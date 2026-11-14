@@ -11,7 +11,8 @@ const { documentFixture } = require("./mock-host.cjs");
 
 const execute = promisify(execFile);
 const root = path.resolve(__dirname, "..", "..");
-const targetExecutable = process.argv.slice(2).find(argument => argument !== "--features-only");
+const targetExecutable = process.argv.slice(2).find(argument =>
+  !["--features-only", "--recurring-defaults-only"].includes(argument));
 const executable = targetExecutable ? path.resolve(targetExecutable)
   : path.join(root, "src", "PromptTerminal.App", "bin", "Debug", "net10.0-windows", "PromptTerminal.App.exe");
 const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -285,8 +286,9 @@ async function runAutomationFeatures(port) {
   const [scheduled, busy] = fixture.workspace.tabs[0].panes;
   scheduled.name = "Recurring smoke";
   busy.name = "Busy recurring smoke";
-  scheduled.profile.startupScript = "[Console]::WriteLine('SCHEDULE-REVIEWED-RUN')";
-  busy.profile.startupScript = "[Console]::WriteLine('BUSY-INTERACTIVE')";
+  scheduled.profile.startupScript = "Get-ChildItem; [Console]::WriteLine('SCHEDULE-REVIEWED-RUN')";
+  scheduled.profile.resumeScript = "[Console]::WriteLine('RECURRING-RESUME-EXIT')";
+  busy.profile.startupScript = "[Console]::WriteLine('BUSY-COMMAND-RUNNING'); Start-Sleep -Seconds 600";
   for (const pane of [scheduled, busy]) {
     pane.profile.workingDirectory = root;
     pane.plan.recurrence = { frequency: "daily", time: "09:00:00", day: "monday" };
@@ -314,10 +316,85 @@ async function runAutomationFeatures(port) {
   await page.waitForFunction(() => document.querySelectorAll(".pane.floating").length === 2);
   assert.equal(await page.locator(".pane.floating").count(), 2);
 
-  await page.getByRole("button", { name: "Start pane Busy recurring smoke", exact: true }).click();
-  await nativeButton("Start 1 session(s)", "Start reviewed sessions");
-  await waitOutput(page, busy.id, "BUSY-INTERACTIVE");
+  for (const action of ["start", "restart", "resume"]) {
+    const generation = Number(await page.locator(`.pane[data-pane-id="${scheduled.id}"]`).getAttribute("data-generation"));
+    if (action === "start")
+      await page.getByRole("button", { name: "Start pane Recurring smoke", exact: true }).click();
+    else await paneAction(page, scheduled.id, action === "restart" ? "Restart with new process..." : "Run configured resume command...");
+    await nativeButton("Start 1 session(s)", "Start reviewed sessions");
+    await page.waitForFunction(({ id, generation }) => {
+      const pane = document.querySelector(`.pane[data-pane-id="${id}"]`);
+      return pane?.dataset.state === "exited" && Number(pane.dataset.generation) > generation;
+    }, { id: scheduled.id, generation });
+    await waitOutput(page, scheduled.id, action === "resume" ? "RECURRING-RESUME-EXIT" : "SCHEDULE-REVIEWED-RUN");
+    assert.match(await page.locator(`[data-pane-id="${scheduled.id}"] .pane-state`).innerText(), /\(0\)/);
+    assert.equal(await page.locator(`[data-pane-id="${scheduled.id}"] .pane-schedule`).innerText(), "Schedule not armed");
+  }
+  await page.getByRole("button", { name: "Start workspace", exact: true }).click();
+  await nativeButton("Start 3 session(s)", "Start reviewed sessions");
+  await page.waitForSelector(`.pane[data-pane-id="${scheduled.id}"][data-state="exited"]`);
+  await waitOutput(page, scheduled.id, "SCHEDULE-REVIEWED-RUN");
+  await waitOutput(page, busy.id, "BUSY-COMMAND-RUNNING");
   const busyPid = await processId(page, busy.id);
+  const interactive = page.getByRole("region", { name: "Inherited floating smoke pane", exact: true });
+  const interactiveId = await interactive.getAttribute("data-pane-id");
+  await page.waitForSelector(`.pane[data-pane-id="${interactiveId}"][data-state="running"]`);
+  const interactivePid = await processId(page, interactiveId);
+  console.log("PASS: recurring manual Start/Restart/Resume/workspace launches close after their commands; ordinary prompts remain open");
+  const paneCount = await page.locator(".pane").count();
+  await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+  await page.getByLabel("Pane name", { exact: true }).fill("Started pane smoke");
+  await page.getByLabel("Startup command or multiline PowerShell script").fill("[Console]::WriteLine('CREATED-AND-STARTED')");
+  await page.getByLabel("Recurring task", { exact: true }).selectOption("hourly");
+  assert.equal(await page.getByLabel("Recurring local time", { exact: true }).isDisabled(), true);
+  assert.equal(await page.getByLabel("Keep shell open after startup script", { exact: true }).isChecked(), false);
+  assert.equal(await page.getByLabel("Keep shell open after startup script", { exact: true }).isDisabled(), true);
+  await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+  await nativeButton("Add and start pane", "Cancel");
+  await page.waitForFunction(() => !document.querySelector("#dialog-submit-start").disabled);
+  assert.equal(await page.locator(".pane").count(), paneCount, "Canceling review creates no pane");
+  assert.equal(await page.locator("#app-dialog").evaluate(dialog => dialog.open), true);
+  await page.getByLabel("PowerShell executable", { exact: true }).fill(path.join(dataDirectory, "missing", "pwsh.exe"));
+  await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+  await page.waitForSelector("#dialog-error:not([hidden])");
+  assert.match(await page.locator("#dialog-error").innerText(), /not added or started.*not found/i);
+  assert.equal(await page.locator(".pane").count(), paneCount, "Invalid launches create no pane");
+  await page.getByLabel("PowerShell executable", { exact: true }).fill(fixture.profiles[0].executable);
+  await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+  await nativeButton("Add and start pane", "Add and start reviewed pane");
+  await page.waitForFunction(count => !document.querySelector("#app-dialog").open &&
+    document.querySelectorAll(".pane").length === count, paneCount + 1);
+  const createdPane = page.getByRole("region", { name: "Started pane smoke pane", exact: true });
+  const createdId = await createdPane.getAttribute("data-pane-id");
+  await waitOutput(page, createdId, "CREATED-AND-STARTED");
+  await page.waitForSelector(`.pane[data-pane-id="${createdId}"][data-state="exited"]`);
+  assert.match(await createdPane.locator(".pane-state").innerText(), /\(0\)/);
+  assert.notEqual(await processId(page, createdId), busyPid);
+  assert.equal(await processId(page, busy.id), busyPid, "Only the new pane starts");
+  assert.equal(await createdPane.locator(".pane-schedule").innerText(), "Schedule not armed");
+  await page.evaluate(() => {
+    window.__hourlySchedule = null;
+    window.chrome.webview.addEventListener("message", event => {
+      if (event.data.type === "state")
+        window.__hourlySchedule = event.data.schedules?.find(item => item.recurrence.frequency === "hourly") || null;
+    });
+  });
+  await paneAction(page, createdId, "Review and arm recurring task...");
+  await nativeButton("Arm recurring task", "Arm reviewed schedule");
+  await page.waitForFunction(() => window.__hourlySchedule !== null);
+  const hourly = await page.evaluate(() => window.__hourlySchedule);
+  const nextHour = new Date(hourly.nextRun);
+  assert.equal(hourly.paneId, createdId);
+  assert.equal(nextHour.getMinutes(), 0);
+  assert.equal(nextHour.getSeconds(), 0);
+  assert.ok(nextHour.getTime() > Date.now() && nextHour.getTime() <= Date.now() + 3600000);
+  await paneAction(page, createdId, "Disarm recurring task");
+  await page.waitForFunction(() => window.__hourlySchedule === null);
+  await createdPane.getByRole("button", { name: "Close pane Started pane smoke", exact: true }).click();
+  await createdPane.waitFor({ state: "detached" });
+  assert.equal(await page.locator(".pane").count(), paneCount);
+  console.log("PASS: add-and-start requires review, cancellation/invalid input create no pane, and hourly arming targets the next local :00");
+  const scheduledGeneration = Number(await page.locator(`.pane[data-pane-id="${scheduled.id}"]`).getAttribute("data-generation"));
   const due = new Date(Date.now() + 35000);
   const time = [due.getHours(), due.getMinutes(), due.getSeconds()].map(value => String(value).padStart(2, "0")).join(":");
   for (const pane of [scheduled, busy]) {
@@ -330,12 +407,22 @@ async function runAutomationFeatures(port) {
   await paneAction(page, scheduled.id, "Edit launch configuration...");
   await page.getByLabel("Startup command or multiline PowerShell script").fill("[Console]::WriteLine('UNREVIEWED-MUST-NOT-RUN')");
   await page.getByRole("button", { name: "Save configuration", exact: true }).click();
-  await page.waitForSelector(`.pane[data-pane-id="${scheduled.id}"][data-state="exited"]`, { timeout: 75000 });
+  await page.waitForFunction(({ id, generation }) => {
+    const pane = document.querySelector(`.pane[data-pane-id="${id}"]`);
+    return pane?.dataset.state === "exited" && Number(pane.dataset.generation) > generation;
+  }, { id: scheduled.id, generation: scheduledGeneration }, { timeout: 75000 });
   await waitOutput(page, scheduled.id, "SCHEDULE-REVIEWED-RUN");
   assert.doesNotMatch(await page.locator(`[data-pane-id="${scheduled.id}"] .xterm-screen`).textContent(), /UNREVIEWED-MUST-NOT-RUN/);
   await page.waitForFunction(id => document.querySelector(`[data-pane-id="${id}"] .pane-schedule`)?.title.includes("Skipped: pane still has"), busy.id);
   assert.equal(await processId(page, busy.id), busyPid);
+  assert.equal(await processId(page, interactiveId), interactivePid);
   console.log("PASS: real recurring task executes the reviewed snapshot, exits its shell, and skips a live pane without interruption");
+  if (process.argv.includes("--recurring-defaults-only")) {
+    await closeApplication();
+    await nativeButton("Close Prompt Terminal", "Close and stop");
+    await waitForExit();
+    return;
+  }
 
   const normal = await windowGeometry("restore", true);
   await windowGeometry("maximize");
@@ -374,7 +461,7 @@ async function runAutomationFeatures(port) {
 async function run() {
   await fs.access(executable);
   dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "PromptTerminal-smoke-"));
-  if (process.argv.includes("--features-only")) {
+  if (process.argv.includes("--features-only") || process.argv.includes("--recurring-defaults-only")) {
     await runAutomationFeatures(await freePort());
     assert.deepEqual(rendererErrors, []);
     return;

@@ -302,6 +302,137 @@ test("daily and weekly schedules are configured without execution and must be ex
   });
 });
 
+test("hourly schedules use the hour boundary and do not require a local time or weekly day", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    await page.locator(`[data-pane-id="${id}"] .pane-name`).click();
+    assert.equal(await page.getByRole("button", { name: "Add and start pane", exact: true }).count(), 0);
+    await page.getByLabel("Recurring task", { exact: true }).selectOption("hourly");
+    assert.equal(await page.getByLabel("Recurring local time", { exact: true }).isDisabled(), true);
+    assert.equal(await page.getByLabel("Weekly day", { exact: true }).isDisabled(), true);
+    await page.getByLabel("Startup command or multiline PowerShell script").fill("agent run 'Hourly review'");
+    await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+    const saved = await page.evaluate(() => window.__host.messages.filter(message => message.type === "editPane").at(-1).data.plan.recurrence);
+    assert.deepEqual(saved, { frequency: "hourly", time: "00:00:00", day: "monday" });
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message => message.type === "armSchedule")), false);
+    await page.getByRole("button", { name: "Schedules", exact: true }).click();
+    assert.match(await page.locator("#dialog-body").innerText(), /Hourly on the hour \(local time\)/);
+    await page.getByRole("button", { name: "Review and arm", exact: true }).click();
+    await page.waitForFunction(() => window.__host.snapshot.schedules.length === 1);
+    assert.match(await page.locator(`[data-pane-id="${id}"] .pane-schedule`).getAttribute("title"), /Hourly on the hour/);
+    await page.getByRole("button", { name: "Disarm schedule", exact: true }).click();
+    await page.getByRole("button", { name: "Configure", exact: true }).click();
+    await page.getByLabel("Recurring task", { exact: true }).selectOption("daily");
+    assert.equal(await page.getByLabel("Recurring local time", { exact: true }).isDisabled(), false);
+  });
+});
+
+test("recurring panes default to auto-close and restore the interactive preference when recurrence is removed", async () => {
+  await withPage(async page => {
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    const keepOpen = page.getByLabel("Keep shell open after startup script", { exact: true });
+    const frequency = page.getByLabel("Recurring task", { exact: true });
+    assert.equal(await keepOpen.isChecked(), true);
+    assert.equal(await keepOpen.isDisabled(), false);
+    for (const value of ["hourly", "daily", "weekdays", "weekly"]) {
+      await frequency.selectOption(value);
+      assert.equal(await keepOpen.isChecked(), false);
+      assert.equal(await keepOpen.isDisabled(), true);
+      await frequency.selectOption("");
+      assert.equal(await keepOpen.isChecked(), true);
+      assert.equal(await keepOpen.isDisabled(), false);
+    }
+    await keepOpen.uncheck();
+    await frequency.selectOption("hourly");
+    await frequency.selectOption("");
+    assert.equal(await keepOpen.isChecked(), false);
+    await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+    const created = await page.evaluate(() => window.__host.messages.filter(message => message.type === "addPane").at(-1).data.pane);
+    assert.equal(created.profile.keepShellOpen, false);
+    assert.equal(created.plan.recurrence, null);
+  });
+});
+
+test("legacy recurring keep-open profiles and copied profiles cannot leave an idle recurring shell", async () => {
+  const fixture = documentFixture(1, 1);
+  const definition = fixture.workspace.tabs[0].panes[0];
+  definition.plan.recurrence = { frequency: "hourly", time: "00:00:00", day: "monday" };
+  definition.profile.keepShellOpen = true;
+  await withPage(async page => {
+    await page.locator(`[data-pane-id="${definition.id}"] .pane-name`).click();
+    const keepOpen = page.getByLabel("Keep shell open after startup script", { exact: true });
+    assert.equal(await keepOpen.isChecked(), false);
+    assert.equal(await keepOpen.isDisabled(), true);
+    await page.getByLabel("Copy a saved launch profile", { exact: true }).selectOption(fixture.profiles[0].id);
+    assert.equal(await keepOpen.isChecked(), false);
+    assert.equal(await keepOpen.isDisabled(), true);
+    await page.getByRole("button", { name: "Save configuration", exact: true }).click();
+    const saved = await page.evaluate(() => window.__host.messages.filter(message => message.type === "editPane").at(-1).data);
+    assert.equal(saved.profile.keepShellOpen, false);
+    assert.equal(saved.plan.recurrence.frequency, "hourly");
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message =>
+      ["startPane", "armSchedule"].includes(message.type))), false);
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    await page.getByLabel("Recurring task", { exact: true }).selectOption("hourly");
+    await page.getByLabel("Copy a saved launch profile", { exact: true }).selectOption(fixture.profiles[0].id);
+    await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+    const added = await page.evaluate(() => window.__host.messages.filter(message => message.type === "addStartedPane").at(-1).data.pane);
+    assert.equal(added.profile.keepShellOpen, false);
+    assert.equal(added.plan.recurrence.frequency, "hourly");
+  }, fixture);
+});
+
+test("new-pane dialog offers a separate reviewed-start action and keeps unstarted creation as the default", async () => {
+  await withPage(async (page, fixture) => {
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    const start = page.getByRole("button", { name: "Add and start pane", exact: true });
+    assert.equal(await start.isVisible(), true);
+    assert.equal(await page.getByRole("button", { name: "Add unstarted pane", exact: true }).isVisible(), true);
+    await page.getByLabel("Pane name", { exact: true }).fill("Started agent");
+    await page.getByLabel("Startup command or multiline PowerShell script").fill("agent run 'Start now'");
+    await start.click();
+    await page.waitForFunction(() => !document.querySelector("#app-dialog").open);
+    const requests = await page.evaluate(() => window.__host.messages.filter(message =>
+      ["addPane", "addStartedPane", "startPane", "armSchedule"].includes(message.type)));
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].type, "addStartedPane");
+    assert.equal(requests[0].data.tabId, fixture.workspace.activeTabId);
+    assert.equal(requests[0].data.pane.name, "Started agent");
+    assert.equal(requests[0].data.pane.profile.startupScript, "agent run 'Start now'");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "Add and start pane", exact: true }).count(), 0);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    await page.getByLabel("Pane name", { exact: true }).press("Enter");
+    await page.waitForFunction(() => window.__host.messages.some(message => message.type === "addPane"));
+    assert.equal(await page.evaluate(() => window.__host.messages.filter(message => message.type === "addStartedPane").length), 1);
+  });
+});
+
+test("both pane submission buttons stay disabled while the reviewed-start request is pending", async () => {
+  await withPage(async page => {
+    await page.evaluate(() => {
+      const original = window.chrome.webview.postMessage.bind(window.chrome.webview);
+      window.chrome.webview.postMessage = message => {
+        if (message.type !== "addStartedPane") return original(message);
+        window.__host.messages.push(structuredClone(message));
+        window.__pendingPaneStart = message;
+      };
+    });
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+    assert.equal(await page.locator("#dialog-submit").isDisabled(), true);
+    assert.equal(await page.locator("#dialog-submit-start").isDisabled(), true);
+    await page.evaluate(() => window.__host.emit({
+      type: "result", id: window.__pendingPaneStart.id, ok: true, cancelled: true, error: null
+    }));
+    await page.waitForFunction(() => !document.querySelector("#dialog-submit-start").disabled);
+    assert.equal(await page.locator("#app-dialog").evaluate(dialog => dialog.open), true);
+    assert.equal(await page.locator("#dialog-submit").isDisabled(), false);
+    assert.equal(await page.evaluate(() => window.__host.messages.filter(message => message.type === "addStartedPane").length), 1);
+  });
+});
+
 test("broadcast starts with no recipients, and snippets require an explicit single-pane paste", async () => {
   await withPage(async (page, fixture) => {
     await page.evaluate(() => window.__host.running());

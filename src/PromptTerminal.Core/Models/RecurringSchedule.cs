@@ -1,6 +1,6 @@
 namespace PromptTerminal.Core.Models;
 
-public enum ScheduleFrequency { Daily, Weekdays, Weekly }
+public enum ScheduleFrequency { Daily, Weekdays, Weekly, Hourly }
 public enum ScheduledRunDecision { NotDue, Ready, SkippedBusy, SkippedMissed }
 
 public sealed class RecurringSchedule
@@ -19,20 +19,32 @@ public static class ScheduleCalculator
         timeZone ??= TimeZoneInfo.Local;
         var earliest = notBefore > after ? notBefore.Value : after;
         var firstDate = TimeZoneInfo.ConvertTime(earliest, timeZone).Date;
+        var hourly = schedule.Frequency == ScheduleFrequency.Hourly;
         for (var index = 0; index < 15; index++)
         {
             var date = firstDate.AddDays(index);
             if (schedule.Frequency == ScheduleFrequency.Weekdays && date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday ||
                 schedule.Frequency == ScheduleFrequency.Weekly && date.DayOfWeek != schedule.Day)
                 continue;
-            var local = DateTime.SpecifyKind(date + schedule.Time.ToTimeSpan(), DateTimeKind.Unspecified);
-            if (timeZone.IsInvalidTime(local)) continue;
-            // Choose the earlier occurrence of an ambiguous wall time, once per date.
-            var offset = timeZone.IsAmbiguousTime(local)
-                ? timeZone.GetAmbiguousTimeOffsets(local).Max()
-                : timeZone.GetUtcOffset(local);
-            var candidate = new DateTimeOffset(local, offset);
-            if (candidate > after && candidate >= earliest) return candidate;
+            DateTimeOffset? next = null;
+            for (var hour = 0; hour < (hourly ? 24 : 1); hour++)
+            {
+                var local = DateTime.SpecifyKind(date + (hourly ? TimeSpan.FromHours(hour) : schedule.Time.ToTimeSpan()),
+                    DateTimeKind.Unspecified);
+                if (timeZone.IsInvalidTime(local)) continue;
+                var offsets = timeZone.IsAmbiguousTime(local)
+                    ? timeZone.GetAmbiguousTimeOffsets(local)
+                    : [timeZone.GetUtcOffset(local)];
+                // Hourly tasks include both repeated-hour boundaries; daily/weekly tasks run once per date.
+                if (!hourly) offsets = [offsets.Max()];
+                foreach (var offset in offsets)
+                {
+                    var candidate = new DateTimeOffset(local, offset);
+                    if (candidate > after && candidate >= earliest && (next is null || candidate < next))
+                        next = candidate;
+                }
+            }
+            if (next is { } occurrence) return occurrence;
         }
         throw new InvalidOperationException("No valid recurring launch time could be found within the next two weeks.");
     }

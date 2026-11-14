@@ -10,6 +10,7 @@ public sealed class RecurringScheduleTests
     [InlineData(ScheduleFrequency.Daily, "2026-11-11T09:00:00Z")]
     [InlineData(ScheduleFrequency.Weekdays, "2026-11-11T09:00:00Z")]
     [InlineData(ScheduleFrequency.Weekly, "2026-11-16T09:00:00Z")]
+    [InlineData(ScheduleFrequency.Hourly, "2026-11-11T09:00:00Z")]
     public void NextOccurrenceUsesRequestedLocalTimeAndFrequency(ScheduleFrequency frequency, string expected)
     {
         var schedule = new RecurringSchedule { Frequency = frequency, Time = new(9, 0), Day = DayOfWeek.Monday };
@@ -87,5 +88,64 @@ public sealed class RecurringScheduleTests
         Assert.Throws<InvalidDataException>(() => ScheduleCalculator.Next(
             new() { Day = (DayOfWeek)99 }, Wednesday));
         Assert.Throws<InvalidDataException>(() => new ScheduledLaunch(new(), Wednesday));
+    }
+
+    [Theory]
+    [InlineData("2026-11-11T08:29:45Z", null, "2026-11-11T09:00:00Z")]
+    [InlineData("2026-11-11T09:00:00Z", null, "2026-11-11T10:00:00Z")]
+    [InlineData("2026-11-11T09:59:59Z", null, "2026-11-11T10:00:00Z")]
+    [InlineData("2026-11-11T23:59:59Z", null, "2026-11-12T00:00:00Z")]
+    [InlineData("2026-11-13T23:15:00Z", null, "2026-11-14T00:00:00Z")]
+    [InlineData("2026-11-11T08:29:45Z", "2026-11-11T11:00:00Z", "2026-11-11T11:00:00Z")]
+    [InlineData("2026-11-11T08:29:45Z", "2026-11-11T11:00:01Z", "2026-11-11T12:00:00Z")]
+    [InlineData("2026-11-11T08:29:45Z", "2026-12-05T13:15:00Z", "2026-12-05T14:00:00Z")]
+    public void HourlyUsesTheNextHourBoundaryAndRespectsEarliestLaunch(
+        string after, string? notBefore, string expected)
+    {
+        var schedule = new RecurringSchedule
+        {
+            Frequency = ScheduleFrequency.Hourly, Time = new(17, 35, 40), Day = DayOfWeek.Sunday
+        };
+        Assert.Equal(DateTimeOffset.Parse(expected), ScheduleCalculator.Next(schedule,
+            DateTimeOffset.Parse(after), notBefore is null ? null : DateTimeOffset.Parse(notBefore), TimeZoneInfo.Utc));
+    }
+
+    [Fact]
+    public void HourlyAlignsToLocalRatherThanUtcHoursInFractionalOffsetZones()
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test+0530", TimeSpan.FromMinutes(330), "Test", "Test");
+        var next = ScheduleCalculator.Next(new() { Frequency = ScheduleFrequency.Hourly },
+            DateTimeOffset.Parse("2026-11-11T08:01:00Z"), timeZone: zone);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-11T08:30:00Z"), next);
+        Assert.Equal(new TimeOnly(14, 0), TimeOnly.FromDateTime(TimeZoneInfo.ConvertTime(next, zone).DateTime));
+    }
+
+    [Theory]
+    [InlineData("2026-03-08T06:30:00Z", "2026-03-08T07:00:00Z")]
+    [InlineData("2026-11-01T04:30:00Z", "2026-11-01T05:00:00Z")]
+    [InlineData("2026-11-01T05:30:00Z", "2026-11-01T06:00:00Z")]
+    [InlineData("2026-11-01T06:00:00Z", "2026-11-01T07:00:00Z")]
+    public void HourlySkipsMissingHoursAndIncludesBothRepeatedHourBoundaries(string after, string expected)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        Assert.Equal(DateTimeOffset.Parse(expected), ScheduleCalculator.Next(
+            new() { Frequency = ScheduleFrequency.Hourly }, DateTimeOffset.Parse(after), timeZone: zone));
+    }
+
+    [Fact]
+    public void HourlyLaunchesOncePerOccurrenceAndSkipsBusyOrMissedHoursWithoutCatchup()
+    {
+        var pane = new PaneDefinition
+        {
+            Plan = new() { Recurrence = new() { Frequency = ScheduleFrequency.Hourly } }
+        };
+        var armed = new ScheduledLaunch(pane, Wednesday.AddMinutes(29), TimeZoneInfo.Utc);
+        Assert.Equal(Wednesday.AddHours(1), armed.NextRun);
+        Assert.Equal(ScheduledRunDecision.Ready, armed.Consume(armed.NextRun, false));
+        Assert.Equal(ScheduledRunDecision.NotDue, armed.Consume(Wednesday.AddHours(1), false));
+        Assert.Equal(ScheduledRunDecision.SkippedBusy, armed.Consume(Wednesday.AddHours(2), true));
+        Assert.Equal(ScheduledRunDecision.SkippedMissed, armed.Consume(Wednesday.AddHours(4).AddMinutes(5), false));
+        Assert.Equal(Wednesday.AddHours(5), armed.NextRun);
+        Assert.Equal(ScheduledRunDecision.Ready, armed.Consume(armed.NextRun.AddSeconds(15), false));
     }
 }

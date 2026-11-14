@@ -11,7 +11,7 @@
   const splitterRects = new Map();
   const paneRects = new Map();
   const workspaceMutations = new Set([
-    "newTab", "renameTab", "reorderTab", "selectTab", "closeTab", "duplicateTab", "addPane", "splitPane",
+    "newTab", "renameTab", "reorderTab", "selectTab", "closeTab", "duplicateTab", "addPane", "addStartedPane", "splitPane",
     "editPane", "focusPane", "closePane", "toggleFloat", "dockPane", "movePane", "resizeSplit",
     "floatingBounds", "readOnly", "settings", "saveProfile", "deleteProfile", "saveSnippet",
     "deleteSnippet", "saveTemplate", "applyTemplate", "deleteTemplate"
@@ -748,6 +748,8 @@
     $("#dialog-submit").textContent = submitLabel || "Done";
     $("#dialog-submit").hidden = !onSubmit;
     $("#dialog-submit").disabled = false;
+    $("#dialog-submit-start").hidden = true;
+    $("#dialog-submit-start").disabled = false;
     $("#dialog-body").replaceChildren();
     build($("#dialog-body"));
     dialogSubmit = onSubmit;
@@ -763,17 +765,18 @@
 
   $("#dialog-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!dialogSubmit) return;
-    const submit = $("#dialog-submit");
-    submit.disabled = true;
+    const submits = [$("#dialog-submit"), $("#dialog-submit-start")];
+    if (!dialogSubmit || submits.some(submit => submit.disabled)) return;
+    for (const submit of submits) submit.disabled = true;
     $("#dialog-error").hidden = true;
     try {
-      const result = await dialogSubmit(new FormData(event.currentTarget), event.currentTarget);
+      const result = await dialogSubmit(new FormData(event.currentTarget), event.currentTarget,
+        event.submitter === $("#dialog-submit-start"));
       if (result !== false) closeDialog();
     } catch (error) {
       $("#dialog-error").textContent = error.message;
       $("#dialog-error").hidden = false;
-    } finally { submit.disabled = false; }
+    } finally { for (const submit of submits) submit.disabled = false; }
   });
   $("#app-dialog").addEventListener("cancel", event => { event.preventDefault(); closeDialog(); });
   document.addEventListener("click", event => { if (event.target.closest("[data-dialog-close]")) closeDialog(); });
@@ -786,9 +789,12 @@
     });
     const tab = activeTab();
     const inputs = {};
+    let manualKeepShellOpen = profile.keepShellOpen;
+    let updateRecurrence;
     showDialog(profileOnly ? "Launch profile" : definition ? "Edit pane configuration" : "Add terminal pane",
       "Launch edits do not change running sessions or armed schedules; disarm and review again to apply changes. Read-only applies immediately. Scripts and environment overrides are plain text: do not enter secrets.",
       profileOnly ? "Save profile" : definition ? "Save configuration" : "Add unstarted pane", body => {
+        $("#dialog-submit-start").hidden = profileOnly || !!definition;
         const grid = element("div", "form-grid");
         body.append(grid);
         if (!profileOnly) {
@@ -818,21 +824,24 @@
           });
           const recurrence = definition?.plan.recurrence;
           inputs.frequency = field(grid, "frequency", "Recurring task", "select", recurrence?.frequency || "", {
-            items: [["", "None (start once)"], ["daily", "Daily"], ["weekdays", "Weekdays (Mon-Fri)"], ["weekly", "Weekly"]]
+            items: [["", "None (start once)"], ["hourly", "Hourly (on the hour)"], ["daily", "Daily"], ["weekdays", "Weekdays (Mon-Fri)"], ["weekly", "Weekly"]]
           });
           inputs.scheduleTime = field(grid, "scheduleTime", "Recurring local time", "time", recurrence?.time || "09:00", { step: 1 });
           inputs.scheduleDay = field(grid, "scheduleDay", "Weekly day", "select", recurrence?.day || "monday", {
             items: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
               .map(day => [day, day[0].toUpperCase() + day.slice(1)])
           });
-          const updateRecurrence = () => {
-            inputs.scheduleTime.disabled = !inputs.frequency.value;
-            inputs.scheduleTime.required = !!inputs.frequency.value;
+          updateRecurrence = () => {
+            if (!inputs.keepShellOpen.disabled) manualKeepShellOpen = inputs.keepShellOpen.checked;
+            inputs.keepShellOpen.disabled = !!inputs.frequency.value;
+            inputs.keepShellOpen.checked = inputs.frequency.value ? false : manualKeepShellOpen;
+            inputs.scheduleTime.disabled = !inputs.frequency.value || inputs.frequency.value === "hourly";
+            inputs.scheduleTime.required = !inputs.scheduleTime.disabled;
             inputs.scheduleDay.disabled = inputs.frequency.value !== "weekly";
           };
           inputs.frequency.addEventListener("change", updateRecurrence);
           updateRecurrence();
-          body.append(element("p", "form-note", "Recurring tasks must be explicitly reviewed and armed in Schedules or pane actions each time the app opens. They run the startup script in a fresh shell that closes when the script finishes, regardless of Keep shell open. Busy/queued panes and missed occurrences are skipped; manual starts remain separate."));
+          body.append(element("p", "form-note", "Hourly runs at :00 of every local hour; the time/day fields apply to other frequencies. A pane with a recurrence always closes its shell when the command finishes, including manual starts, so an idle prompt cannot block its next run. Keep shell open is unavailable until recurrence is removed. Existing sessions are unchanged. Recurring tasks must still be reviewed and armed in Schedules or pane actions each time the app opens. Busy/queued panes and missed occurrences are skipped; manual starts do not arm the schedule."));
           inputs.saveProfile = checkbox(grid, "saveProfile", "Also save a reusable launch profile", false);
         }
         inputs.savedProfile?.addEventListener("change", () => {
@@ -840,6 +849,8 @@
           if (!saved) return;
           for (const name of ["name", "executable", "workingDirectory", "startupScript", "resumeScript", "accentColor"]) inputs[name].value = saved[name];
           for (const name of ["loadUserProfile", "keepShellOpen", "enableIntegration"]) inputs[name].checked = saved[name];
+          manualKeepShellOpen = saved.keepShellOpen;
+          updateRecurrence?.();
           inputs.environment.value = JSON.stringify(saved.environment, null, 2);
           if (!definition) inputs.paneName.value = saved.name;
         });
@@ -851,7 +862,7 @@
           for (const [name, label, min] of [["x", "Left", 0], ["y", "Top", 0], ["width", "Width", 280], ["height", "Height", 180]])
             inputs[name] = field(geometry, name, label, "number", bounds[name], { required: true, min, max: 100000 });
         }
-      }, async () => {
+      }, async (_data, _form, startAfterAdding) => {
         let environment;
         try { environment = JSON.parse(inputs.environment.value); }
         catch { throw new Error("Environment overrides must be a JSON object with string values."); }
@@ -871,14 +882,16 @@
             afterPaneId: inputs.afterPaneId.value || null,
             recurrence: inputs.frequency.value ? {
               frequency: inputs.frequency.value,
-              time: inputs.scheduleTime.value.length === 5 ? `${inputs.scheduleTime.value}:00` : inputs.scheduleTime.value,
+              time: inputs.frequency.value === "hourly" ? "00:00:00" :
+                inputs.scheduleTime.value.length === 5 ? `${inputs.scheduleTime.value}:00` : inputs.scheduleTime.value,
               day: inputs.scheduleDay.value
             } : null
           }
         };
         const result = definition
           ? await command("editPane", { paneId: id, name: pane.name, profile: edited, readOnly: pane.readOnly, plan: pane.plan })
-          : await command("addPane", { tabId: tab.id, targetPaneId: tab.activePaneId, axis: null, floating: inputs.floating.checked, pane });
+          : await command(startAfterAdding ? "addStartedPane" : "addPane",
+            { tabId: tab.id, targetPaneId: tab.activePaneId, axis: null, floating: inputs.floating.checked, pane });
         if (result && inputs.saveProfile.checked) await command("saveProfile", edited);
         if (result && inputs.x) await command("floatingBounds", { paneId: id, x: Number(inputs.x.value), y: Number(inputs.y.value),
           width: Number(inputs.width.value), height: Number(inputs.height.value) });
@@ -942,6 +955,7 @@
   }
 
   function scheduleSummary(recurrence) {
+    if (recurrence.frequency === "hourly") return "Hourly on the hour (local time)";
     const frequency = { daily: "Daily", weekdays: "Weekdays", weekly: `Weekly (${recurrence.day})` };
     return `${frequency[recurrence.frequency]} at ${recurrence.time} (local time)`;
   }
@@ -956,7 +970,7 @@
             .filter(pane => pane.plan.recurrence || state.schedules?.some(item => item.paneId === pane.id))
             .map(pane => ({ tab, pane })));
           if (!configured.length)
-            body.append(element("p", "form-note", "Edit a pane, add a startup script, then choose a daily, weekday or weekly recurrence."));
+            body.append(element("p", "form-note", "Edit a pane, add a startup script, then choose an hourly, daily, weekday or weekly recurrence."));
           for (const { tab, pane } of configured) {
             const armed = state.schedules?.find(item => item.paneId === pane.id);
             const row = element("div", "list-row");
@@ -1186,7 +1200,7 @@
         "Send-PromptTerminalSignal -State completed -Message 'Tests passed'\n" +
         "Send-PromptTerminalSignal -State directory -Message $PWD.Path\n\n" +
         "Scheduled dependencies require a new explicit completed signal from the prerequisite launch. " +
-        "Daily, weekday and weekly tasks must be reviewed and armed for each app session. Busy panes and missed runs are skipped; scheduled shells close when their startup script finishes. " +
+        "Hourly (on the hour), daily, weekday and weekly tasks must be reviewed and armed for each app session. Busy panes and missed runs are skipped; scheduled shells close when their startup script finishes. " +
         "Enable keep-awake in Settings to prevent automatic idle sleep/hibernation without changing Windows power settings.\n\n" +
         "Metrics report shell-host CPU/memory, not agent process trees.\n\n" +
         "Alt+drag a floating title bar over a tiled pane to preview docking. Splitters support arrow keys. " +

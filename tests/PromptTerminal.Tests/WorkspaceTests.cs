@@ -173,6 +173,25 @@ public sealed class WorkspaceTests : IDisposable
         Assert.Null(restored.Workspace.Tabs[0].Panes[0].Plan.Recurrence);
     }
 
+    [Fact]
+    public async Task HourlyDefinitionAndEarliestLaunchPersistWithoutArmingTheSchedule()
+    {
+        var document = WorkspaceDefaults.Create();
+        var pane = document.Workspace.Tabs[0].Panes[0];
+        pane.Plan.Recurrence = new() { Frequency = ScheduleFrequency.Hourly };
+        pane.Plan.NotBefore = DateTimeOffset.Parse("2026-12-05T13:15:00Z");
+        var store = new WorkspaceStore(Path.Combine(_directory, "hourly.json"));
+        await store.SaveAsync(document);
+        var restored = (await store.LoadAsync())!;
+        var plan = restored.Workspace.Tabs[0].Panes[0].Plan;
+        Assert.Equal(ScheduleFrequency.Hourly, plan.Recurrence!.Frequency);
+        Assert.Equal(pane.Plan.NotBefore, plan.NotBefore);
+        var json = await File.ReadAllTextAsync(store.Path);
+        Assert.Contains("\"frequency\": \"hourly\"", json);
+        Assert.DoesNotContain("nextRun", json);
+        Assert.DoesNotContain("Armed", json);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_directory)) Directory.Delete(_directory, true);

@@ -37,6 +37,10 @@ Create a tab or pane, edit its shell, working directory and startup command, the
 choose **Review and start** or **Start workspace**. The native preview shows the
 resolved executable, scripts, environment overrides and launch conditions.
 Restoring or importing a workspace **never starts its sessions automatically**.
+The new-pane dialog also offers **Add and start pane**: its native review creates
+and starts only that pane after approval. Canceling the review or failing launch
+validation leaves the dialog open without adding a pane. **Add unstarted pane**
+remains the default action, including when submitting with Enter.
 
 PowerShell 7 is selected for a new configuration when available; otherwise the
 default profile explicitly names Windows PowerShell. A configured executable is
@@ -59,7 +63,7 @@ never silently replaced by another shell.
 - Workspace templates, prompt snippets, command palette, Git worktree creation,
   explicit integration notifications, scheduled/dependent startup, deliberate
   broadcast input and shell-host CPU/memory indicators.
-- Opt-in keep-awake mode; reviewed daily, weekday and weekly agent tasks;
+- Opt-in keep-awake mode; reviewed hourly, daily, weekday and weekly agent tasks;
   inherited pane placement and remembered main-window size/maximized state.
 
 Floating title bars are clamped to reachable positions after a viewport change.
@@ -125,16 +129,25 @@ still suspend or stop work; this is not an unconditional 24/7 guarantee.
 To schedule an agent:
 
 1. Edit its pane and enter the actual CLI command/script.
-2. Select **Daily**, **Weekdays (Mon-Fri)** or **Weekly**, a local time and, for
+2. Select **Hourly (on the hour)**, **Daily**, **Weekdays (Mon-Fri)** or **Weekly**.
+   Hourly runs at the next local `:00` boundary and every hour afterward; it
+   does not use a chosen time/day. Other frequencies use a local time and, for
    weekly tasks, a day. The optional earliest launch time remains a lower bound.
 3. Open **Schedules** or pane actions and **Review and arm** the native launch
    preview. Merely saving a recurrence does not execute or arm it.
 
 Each occurrence starts a fresh shell with the reviewed script, environment and
-working directory. Scheduled shells close when their startup script finishes,
-regardless of the pane's manual **Keep shell open** preference. Existing live or
-queued sessions are never stopped to make room: that occurrence is skipped
-visibly. Dependencies still require their expected explicit completion signal.
+working directory. **Any pane configured with a recurrence closes its shell
+when the command finishes**, including manual Start, Restart, Resume, Start
+workspace and Add and start. Its **Keep shell open** checkbox is automatically
+cleared and unavailable while recurrence is selected. This also applies to
+older saved recurring panes whose profile still has keep-open enabled, so an
+idle manual prompt cannot block the next occurrence. Ordinary panes without
+recurrence retain their chosen keep-open behavior. These defaults affect new
+launches only; an already running session is not forcibly closed.
+
+Existing live or queued sessions are never stopped to make room: that occurrence
+is skipped visibly. Dependencies still require their expected explicit completion signal.
 Run noninteractive agent commands for unattended work; authentication, approval
 or input prompts can keep a task alive and cause later occurrences to skip.
 
@@ -144,7 +157,9 @@ re-arms them. Disarm/review again to apply edits to an approved snapshot.
 Disarming leaves an already running occurrence alone; **Stop** also disarms
 future runs. An occurrence missed by more than one minute is skipped, without
 catch-up bursts. Local daylight-saving gaps are skipped; repeated wall-clock
-times run once per date. Next run and skipped/queued status appear in
+times run once per date for daily/weekday/weekly tasks. Hourly tasks include both
+occurrences of a repeated hour, so each actual local `:00` boundary is eligible.
+Next run and skipped/queued status appear in
 **Schedules** and pane footers.
 
 ## Keyboard defaults
@@ -233,6 +248,10 @@ npm run test:desktop -- .\artifacts\publish\win-x64\PromptTerminal.App.exe
 
 For just the keep-awake, recurring-task, inherited-placement and window-restore
 desktop checks, append `--features-only` (an executable path is optional).
+These checks also cover reviewed add-and-start, canceled/invalid pane creation,
+and hourly schedule arming at the next local hour.
+Use `--recurring-defaults-only` to focus on recurring manual-launch auto-close,
+normal interactive prompts, reviewed add-and-start and actual scheduled/busy runs.
 
 The browser tests use locally installed Microsoft Edge. The desktop smoke test
 requires an interactive Windows desktop and the Debug build. It checks twelve
