@@ -15,7 +15,8 @@ function documentFixture(tabCount = 2, panesPerTab = 2) {
     for (const pane of panes.slice(1))
       root = { id: randomUUID(), paneId: null, axis: "horizontal", ratio: .5, first: root,
         second: { id: randomUUID(), paneId: pane.id, axis: "horizontal", ratio: .5, first: null, second: null } };
-    return { id: randomUUID(), name: `Project ${tabIndex + 1}`, accentColor: "#7c8aff", panes, root, floating: [], activePaneId: panes[0].id };
+    return { id: randomUUID(), name: `Project ${tabIndex + 1}`, accentColor: "#7c8aff",
+      panes, root, floating: [], autoArrangeFloating: true, activePaneId: panes[0].id };
   });
   return {
     schemaVersion: 1, workspace: { schemaVersion: 1, tabs, activeTabId: tabs[0].id },
@@ -38,9 +39,31 @@ async function installMockHost(page, document) {
       maximized: {}, unreadTabs: [], saveStatus: "Saved locally", autosaveEnabled: true
     };
     const fixture = {
-      snapshot, messages: [],
+      snapshot, messages: [], responsiveFloating: false,
       emit(message) { for (const listener of listeners) listener({ data: structuredClone(message) }); },
       publish(update = {}) { Object.assign(snapshot, update); fixture.emit(snapshot); },
+      arrangeFloating(width, height) {
+        for (const tab of document.workspace.tabs) {
+          if (!tab.autoArrangeFloating || !tab.floating.length) continue;
+          if (tab.root) {
+            const existing = new Map(tab.floating.map(item => [item.paneId, item]));
+            tab.floating = tab.panes.map((pane, index) => existing.get(pane.id) ||
+              { paneId: pane.id, x: 10, y: 10, width: 600, height: 360, z: index + 1 });
+            tab.root = null;
+          }
+          const count = tab.floating.length, availableWidth = Math.max(280, width - 20),
+            availableHeight = Math.max(180, height - 20);
+          const maximumColumns = Math.min(count, Math.max(1, Math.floor((availableWidth + 12) / 292)));
+          const maximumRows = Math.max(1, Math.floor((availableHeight + 12) / 192));
+          const columns = Math.min(maximumColumns, Math.max(1, Math.floor((availableWidth + 12) / 612),
+            Math.ceil(count / maximumRows)));
+          const rows = Math.ceil(count / columns), cellWidth = Math.floor((availableWidth - (columns - 1) * 12) / columns),
+            cellHeight = Math.max(180, Math.floor((availableHeight - (rows - 1) * 12) / rows));
+          tab.floating.forEach((item, index) => Object.assign(item,
+            { x: 10 + index % columns * (cellWidth + 12), y: 10 + Math.floor(index / columns) * (cellHeight + 12),
+              width: cellWidth, height: cellHeight }));
+        }
+      },
       running() {
         snapshot.runtimes = document.workspace.tabs.flatMap(tab => tab.panes.map((pane, index) => ({
           paneId: pane.id, generation: 1, state: "running", processId: 2000 + index,
@@ -67,6 +90,16 @@ async function installMockHost(page, document) {
           }
           if (message.type === "selectTab") {
             document.workspace.activeTabId = message.data.tabId;
+            fixture.publish();
+          }
+          if (message.type === "workspaceViewport" && fixture.responsiveFloating) {
+            fixture.arrangeFloating(message.data.width, message.data.height);
+            fixture.publish();
+          }
+          if (message.type === "renameTab") {
+            const tab = document.workspace.tabs.find(tab => tab.id === message.data.tabId);
+            Object.assign(tab, { name: message.data.name, accentColor: message.data.accentColor,
+              autoArrangeFloating: message.data.autoArrangeFloating ?? tab.autoArrangeFloating });
             fixture.publish();
           }
           if (message.type === "focusPane") {

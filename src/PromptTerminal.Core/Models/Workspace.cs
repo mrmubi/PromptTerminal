@@ -106,6 +106,7 @@ public sealed class WorkspaceTab
     public List<PaneDefinition> Panes { get; set; } = [];
     public LayoutNode? Root { get; set; }
     public List<FloatingPane> Floating { get; set; } = [];
+    public bool AutoArrangeFloating { get; set; } = true;
     public Guid? ActivePaneId { get; set; }
 }
 

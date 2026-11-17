@@ -12,7 +12,7 @@ const { documentFixture } = require("./mock-host.cjs");
 const execute = promisify(execFile);
 const root = path.resolve(__dirname, "..", "..");
 const targetExecutable = process.argv.slice(2).find(argument =>
-  !["--features-only", "--recurring-defaults-only"].includes(argument));
+  !["--features-only", "--recurring-defaults-only", "--floating-layout-only", "--activity-only"].includes(argument));
 const executable = targetExecutable ? path.resolve(targetExecutable)
   : path.join(root, "src", "PromptTerminal.App", "bin", "Debug", "net10.0-windows", "PromptTerminal.App.exe");
 const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -257,28 +257,261 @@ async function waitForExit() {
 }
 
 async function windowGeometry(mode = "", resize = false) {
+  const bounds = resize === true ? { left: 20, top: 20, width: 1120, height: 740 } : resize;
   return JSON.parse(await ps(`
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class FeatureWindow {
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr window, int x, int y, int width, int height, bool repaint);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
   [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr window);
 }
 '@
+[FeatureWindow]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
 $handle = (Get-Process -Id ${application.pid}).MainWindowHandle
 ${mode ? `[FeatureWindow]::ShowWindow($handle, ${mode === "maximize" ? 3 : 9}) | Out-Null` : ""}
-${resize ? "if (-not [FeatureWindow]::MoveWindow($handle, 20, 20, 1120, 740, $true)) { throw 'Resize failed.' }" : ""}
+${bounds ? `if (-not [FeatureWindow]::MoveWindow($handle, ${bounds.left}, ${bounds.top}, ${bounds.width}, ${bounds.height}, $true)) { throw 'Resize failed.' }` : ""}
 Start-Sleep -Milliseconds 250
 $rect = [FeatureWindow+Rect]::new()
 if (-not [FeatureWindow]::GetWindowRect($handle, [ref]$rect)) { throw 'Window bounds could not be read.' }
-@{ width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top;
+$monitor = [FeatureWindow+MonitorInfo]::new()
+$monitor.Size = [Runtime.InteropServices.Marshal]::SizeOf($monitor)
+if (-not [FeatureWindow]::GetMonitorInfo([FeatureWindow]::MonitorFromWindow($handle, 2), [ref]$monitor)) { throw 'Monitor bounds could not be read.' }
+@{ left = $rect.Left; top = $rect.Top; right = $rect.Right; bottom = $rect.Bottom;
+   workLeft = $monitor.Work.Left; workTop = $monitor.Work.Top; workRight = $monitor.Work.Right; workBottom = $monitor.Work.Bottom;
+   width = $rect.Right - $rect.Left; height = $rect.Bottom - $rect.Top;
    dpi = [FeatureWindow]::GetDpiForWindow($handle); maximized = [FeatureWindow]::IsZoomed($handle) } | ConvertTo-Json -Compress
 `));
+}
+
+async function savedDocument(predicate) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const saved = JSON.parse(await fs.readFile(path.join(dataDirectory, "workspace.json"), "utf8"));
+    if (predicate(saved)) return saved;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("The expected workspace and window geometry were not persisted.");
+}
+
+async function assertFloatingGrid(page, count) {
+  await page.waitForFunction(count => {
+    const tab = window.__floatingState?.document.workspace.tabs[0];
+    if (tab?.floating.length !== count || tab.root) return false;
+    const section = document.querySelector(".workspace:not(.is-inactive)");
+    const right = Math.max(...tab.floating.map(item => item.x + item.width));
+    return right <= section.clientWidth - 10 && section.clientWidth - right <= count + 10;
+  }, count);
+  const grid = await page.evaluate(() => {
+    const tab = window.__floatingState.document.workspace.tabs[0];
+    return { placements: tab.floating, ids: tab.panes.map(pane => pane.id),
+      rectangles: Array.from(document.querySelectorAll(".pane.floating"), pane =>
+        ({ id: pane.dataset.paneId, x: pane.offsetLeft, y: pane.offsetTop, width: pane.offsetWidth, height: pane.offsetHeight })) };
+  });
+  assert.deepEqual(grid.placements.map(item => item.paneId), grid.ids);
+  assert.equal(new Set(grid.placements.map(item => item.width)).size, 1);
+  assert.equal(new Set(grid.placements.map(item => item.height)).size, 1);
+  for (let index = 0; index < count; index++) {
+    const item = grid.placements[index], actual = grid.rectangles.find(rect => rect.id === item.paneId);
+    assert.deepEqual(actual, { id: item.paneId, x: item.x, y: item.y, width: item.width, height: item.height });
+    assert.ok(item.width >= 280 && item.height >= 180);
+    if (index) {
+      const previous = grid.placements[index - 1];
+      assert.ok(item.y > previous.y || item.y === previous.y && item.x > previous.x);
+    }
+    for (const other of grid.placements.slice(index + 1))
+      assert.equal(item.x < other.x + other.width && item.x + item.width > other.x &&
+        item.y < other.y + other.height && item.y + item.height > other.y, false);
+  }
+  return grid;
+}
+
+async function runFloatingLayout(port) {
+  const fixture = documentFixture(1, 1), survivor = fixture.workspace.tabs[0].panes[0];
+  survivor.name = "Layout survivor";
+  survivor.profile.workingDirectory = root;
+  survivor.profile.startupScript = "[Console]::WriteLine('LAYOUT-SURVIVOR'); " +
+    "0..79 | ForEach-Object { [Console]::WriteLine(('LAYOUT-HISTORY-{0:D3}' -f $_)) }; " +
+    "[Console]::WriteLine('LAYOUT-HISTORY-READY')";
+  fixture.profiles[0].workingDirectory = root;
+  await fs.writeFile(path.join(dataDirectory, "workspace.json"), JSON.stringify(fixture));
+  let page = await startApplication(port);
+  await page.evaluate(() => {
+    window.__floatingViewportReports = 0;
+    window.chrome.webview.addEventListener("message", event => {
+      if (event.data.type === "state") window.__floatingState = event.data;
+    });
+    const originalPost = window.chrome.webview.postMessage;
+    window.chrome.webview.postMessage = function (message) {
+      if (message.type === "workspaceViewport") window.__floatingViewportReports++;
+      return originalPost.call(this, message);
+    };
+  });
+  const monitor = await windowGeometry(), scale = monitor.dpi / 96;
+  const compact = { left: monitor.workLeft, top: monitor.workTop,
+    width: Math.round(820 * scale), height: Math.min(monitor.workBottom - monitor.workTop, Math.round(760 * scale)) };
+  const initial = await windowGeometry("restore", compact);
+  await page.getByRole("button", { name: "Start pane Layout survivor", exact: true }).click();
+  await nativeButton("Start 1 session(s)", "Start reviewed sessions");
+  await waitOutput(page, survivor.id, "LAYOUT-HISTORY-READY");
+  const baseline = await renderedTranscript(page, survivor.id);
+  const visibleRows = await page.locator(`.pane[data-pane-id="${survivor.id}"] .xterm-rows > div`).count();
+  assert.ok(visibleRows > 0);
+  // ConPTY can redraw the live screen on resize; independently verify the older scrollback.
+  const history = baseline.split(/\r?\n/).slice(0, -visibleRows).filter(line => /^LAYOUT-HISTORY-\d{3}$/.test(line));
+  assert.ok(history.length >= 20);
+  assert.match(baseline, /LAYOUT-SURVIVOR/, "The history marker starts in scrollback");
+  const pid = await processId(page, survivor.id);
+  const generation = await page.locator(`.pane[data-pane-id="${survivor.id}"]`).getAttribute("data-generation");
+  await page.evaluate(id => { window.__survivorTerminal = document.querySelector(`[data-pane-id="${id}"] .xterm`); }, survivor.id);
+  async function addPane(index) {
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    assert.equal(await page.getByLabel("Create as floating panel").isChecked(), true);
+    await page.getByLabel("Pane name", { exact: true }).fill(`Automatic floating ${index}`);
+    await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+    await page.waitForFunction(count => window.__floatingState?.document.workspace.tabs[0].panes.length === count, index);
+    return assertFloatingGrid(page, index);
+  }
+  await addPane(2);
+  const grown = await windowGeometry();
+  if (initial.width < initial.workRight - initial.workLeft) assert.ok(grown.width > initial.width);
+  assert.equal(grown.height, initial.height);
+  assert.ok(grown.left >= grown.workLeft && grown.right <= grown.workRight);
+  assert.equal(grown.maximized, false);
+  console.log("PASS: new panes float by default, promote tiled panes, widen the native window and preserve height within the current monitor");
+  await sendCommand(page, survivor.id, "[Console]::WriteLine('LAYOUT-FOCUSED-EARLIER')");
+  await waitOutput(page, survivor.id, "LAYOUT-FOCUSED-EARLIER");
+  await paneAction(page, survivor.id, "Duplicate as new pane");
+  await assertFloatingGrid(page, 3);
+  const capCount = Math.max(4, Math.ceil((monitor.workRight - monitor.workLeft) / scale / 600) + 2);
+  for (let count = 4; count <= capCount; count++) await addPane(count);
+  const wide = await windowGeometry();
+  assert.equal(wide.width, wide.workRight - wide.workLeft);
+  const wideGrid = await assertFloatingGrid(page, capCount);
+  await windowGeometry("restore", compact);
+  const narrowGrid = await assertFloatingGrid(page, capCount);
+  assert.ok(narrowGrid.placements[0].width < wideGrid.placements[0].width ||
+    narrowGrid.placements.at(-1).y > wideGrid.placements.at(-1).y);
+  assert.equal((await windowGeometry()).width, initial.width, "Reflow does not undo a user's narrower window size");
+  const reports = await page.evaluate(() => window.__floatingViewportReports);
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => window.__floatingViewportReports), reports, "Viewport reporting stabilizes without a resize loop");
+  await windowGeometry("restore", { ...compact, width: wide.width });
+  await assertFloatingGrid(page, capCount);
+  const normal = await windowGeometry();
+  await windowGeometry("maximize");
+  await addPane(capCount + 1);
+  assert.equal((await windowGeometry()).maximized, true, "Adding a pane never unmaximizes the window");
+  const docked = await page.evaluate(() => window.__floatingState.document.workspace.tabs[0].panes.at(-1).id);
+  await page.locator(`.pane[data-pane-id="${docked}"]`).getByRole("button", { name: /Float or dock/ }).click();
+  await page.getByRole("button", { name: "Dock pane", exact: true }).click();
+  await page.waitForFunction(() => {
+    const tab = window.__floatingState.document.workspace.tabs[0];
+    return tab.root && !tab.autoArrangeFloating;
+  });
+  await page.getByRole("button", { name: "Tab options", exact: true }).click();
+  await page.getByLabel("Auto-arrange floating panes in an equal grid").check();
+  await page.getByRole("button", { name: "Save tab", exact: true }).click();
+  await assertFloatingGrid(page, capCount + 1);
+  assert.equal(await processId(page, survivor.id), pid);
+  assert.equal(await page.locator(`.pane[data-pane-id="${survivor.id}"]`).getAttribute("data-generation"), generation);
+  assert.equal(await page.evaluate(id => window.__survivorTerminal ===
+    document.querySelector(`[data-pane-id="${id}"] .xterm`), survivor.id), true);
+  const transcript = await renderedTranscript(page, survivor.id);
+  assert.match(transcript, /LAYOUT-SURVIVOR/);
+  assert.deepEqual(transcript.split(/\r?\n/).filter(line => /^LAYOUT-HISTORY-\d{3}$/.test(line)).slice(0, history.length), history);
+  console.log("PASS: creation-order grids, monitor cap, responsive rows/columns and maximized additions retain the real shell, generation, terminal and history");
+  const saved = await savedDocument(document => document.mainWindow?.maximized &&
+    document.workspace.tabs[0].floating.length === capCount + 1 &&
+    Math.abs(document.mainWindow.width - normal.width / scale) < 3 &&
+    Math.abs(document.mainWindow.height - normal.height / scale) < 3);
+  assert.equal(saved.workspace.tabs[0].autoArrangeFloating, true);
+  await closeApplication();
+  await nativeButton("Close Prompt Terminal", "Close and stop");
+  await waitForExit();
+  await browser.close();
+  browser = null;
+  page = await startApplication(await freePort());
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), capCount + 1);
+  assert.equal((await windowGeometry()).maximized, true);
+  const restored = await windowGeometry("restore");
+  assert.ok(Math.abs(restored.width - normal.width) < 4, "Automatic width growth restores as the normal window width");
+  assert.ok(Math.abs(restored.height - normal.height) < 4, "The normal window height is retained");
+  assert.doesNotMatch(await page.locator(".xterm-screen").allTextContents().then(text => text.join("")), /LAYOUT-SURVIVOR/);
+  console.log("PASS: grid membership, normal window bounds and maximized state persist without restarting commands");
+  await closeApplication();
+  await waitForExit();
+}
+
+async function runActivityIndicator(port) {
+  const fixture = documentFixture(1, 3), [working, idle, scheduled] = fixture.workspace.tabs[0].panes;
+  working.name = "Output smoke";
+  idle.name = "Idle smoke";
+  scheduled.name = "Scheduled output smoke";
+  for (const pane of [working, idle, scheduled]) {
+    pane.profile.workingDirectory = root;
+    pane.profile.enableIntegration = false;
+  }
+  const due = new Date(Date.now() + 45000);
+  scheduled.plan.recurrence = { frequency: "daily",
+    time: [due.getHours(), due.getMinutes(), due.getSeconds()].map(value => String(value).padStart(2, "0")).join(":"), day: "monday" };
+  scheduled.profile.startupScript = "0..3 | ForEach-Object { [Console]::WriteLine(('SCHEDULED-ACTIVITY-{0}' -f $_)); Start-Sleep -Seconds 1 }";
+  fixture.profiles[0].workingDirectory = root;
+  await fs.writeFile(path.join(dataDirectory, "workspace.json"), JSON.stringify(fixture));
+  const page = await startApplication(port);
+  await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+  await paneAction(page, scheduled.id, "Review and arm recurring task...");
+  await nativeButton("Arm recurring task", "Arm reviewed schedule");
+  for (const pane of [working, idle]) {
+    await page.getByRole("button", { name: `Start pane ${pane.name}`, exact: true }).click();
+    await nativeButton("Start 1 session(s)", "Start reviewed sessions");
+  }
+  await page.waitForFunction(() => document.querySelectorAll('.pane[data-state="running"]').length === 2);
+  const workingPid = await processId(page, working.id), idlePid = await processId(page, idle.id);
+  const pane = page.locator(`.pane[data-pane-id="${working.id}"]`);
+  await page.waitForFunction(() => document.querySelectorAll(".pane.is-working").length === 0);
+  assert.equal(await page.locator(".pane.is-working").count(), 0, "An idle live shell must not animate");
+  await sendCommand(page, working.id,
+    "0..3 | ForEach-Object { [Console]::WriteLine(('MANUAL-ACTIVITY-{0}' -f $_)); Start-Sleep -Seconds 1 }");
+  for (let index = 0; index < 4; index++) {
+    await waitOutput(page, working.id, `MANUAL-ACTIVITY-${index}`);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
+    assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationName), "pane-border-orbit");
+    assert.equal(await pane.locator(".pane-signal").textContent(), "");
+    assert.equal(await page.locator(`.pane[data-pane-id="${idle.id}"]`).evaluate(node => node.classList.contains("is-working")), false);
+  }
+  await page.waitForFunction(id => !document.querySelector(`.pane[data-pane-id="${id}"]`).classList.contains("is-working"), working.id);
+  assert.equal(await processId(page, working.id), workingPid, "Quiet output does not stop or complete a session");
+  assert.equal(await processId(page, idle.id), idlePid);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await sendCommand(page, working.id, "[Console]::WriteLine('REDUCED-MOTION-ACTIVITY')");
+  await waitOutput(page, working.id, "REDUCED-MOTION-ACTIVITY");
+  assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
+  assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationName), "none");
+  assert.equal(await pane.locator(".pane-name").evaluate(node => getComputedStyle(node).opacity), "1");
+  await sendCommand(page, working.id, "exit");
+  await page.waitForSelector(`.pane[data-pane-id="${working.id}"][data-state="exited"]`);
+  assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.waitForFunction(id => document.querySelector(`.pane[data-pane-id="${id}"] .xterm-screen`)
+    ?.textContent.includes("SCHEDULED-ACTIVITY-0"), scheduled.id, { timeout: 75000 });
+  const scheduledPane = page.locator(`.pane[data-pane-id="${scheduled.id}"]`);
+  assert.equal(await scheduledPane.evaluate(node => node.classList.contains("is-working")), true);
+  assert.equal(await scheduledPane.locator(".pane-signal").textContent(), "");
+  await page.waitForSelector(`.pane[data-pane-id="${scheduled.id}"][data-state="exited"]`);
+  assert.equal(await scheduledPane.evaluate(node => node.classList.contains("is-working")), false);
+  assert.equal(await processId(page, idle.id), idlePid);
+  console.log("PASS: manual and scheduled output animate without integration; two-second inactivity, process exit and reduced motion are respected");
+  await closeApplication();
+  await nativeButton("Close Prompt Terminal", "Close and stop");
+  await waitForExit();
 }
 
 async function runAutomationFeatures(port) {
@@ -313,8 +546,8 @@ async function runAutomationFeatures(port) {
   assert.equal(await page.getByLabel("Create as floating panel").isChecked(), true);
   await page.getByLabel("Pane name", { exact: true }).fill("Inherited floating smoke");
   await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".pane.floating").length === 2);
-  assert.equal(await page.locator(".pane.floating").count(), 2);
+  await page.waitForFunction(() => document.querySelectorAll(".pane.floating").length === 3);
+  assert.equal(await page.locator(".pane.floating").count(), 3);
 
   for (const action of ["start", "restart", "resume"]) {
     const generation = Number(await page.locator(`.pane[data-pane-id="${scheduled.id}"]`).getAttribute("data-generation"));
@@ -428,14 +661,16 @@ async function runAutomationFeatures(port) {
   await windowGeometry("maximize");
   await page.locator(".header-actions summary").click();
   await page.getByRole("button", { name: "Save now", exact: true }).click();
-  await page.waitForFunction(() => document.querySelector("#save-status").textContent === "Saved locally");
-  const saved = JSON.parse(await fs.readFile(path.join(dataDirectory, "workspace.json"), "utf8"));
+  const saved = await savedDocument(document => document.mainWindow?.maximized &&
+    Math.abs(document.mainWindow.width - normal.width * 96 / normal.dpi) < 3 &&
+    Math.abs(document.mainWindow.height - normal.height * 96 / normal.dpi) < 3);
   const originalBounds = saved.workspace.tabs[0].floating.find(item => item.paneId === scheduled.id);
-  const inherited = saved.workspace.tabs[0].floating.find(item => item.paneId !== scheduled.id);
+  const inherited = saved.workspace.tabs[0].floating.find(item => item.paneId === interactiveId);
+  const previous = saved.workspace.tabs[0].floating.find(item => item.paneId === busy.id);
   assert.equal(inherited.width, originalBounds.width);
   assert.equal(inherited.height, originalBounds.height);
-  assert.equal(inherited.x, originalBounds.x + originalBounds.width + 12);
-  assert.equal(inherited.y, originalBounds.y);
+  assert.ok(inherited.y > previous.y ||
+    inherited.y === previous.y && inherited.x === previous.x + previous.width + 12);
   assert.ok(Math.abs(saved.mainWindow.width - normal.width * 96 / normal.dpi) < 3);
   assert.ok(Math.abs(saved.mainWindow.height - normal.height * 96 / normal.dpi) < 3);
   assert.equal(saved.mainWindow.maximized, true);
@@ -461,6 +696,16 @@ async function runAutomationFeatures(port) {
 async function run() {
   await fs.access(executable);
   dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "PromptTerminal-smoke-"));
+  if (process.argv.includes("--activity-only")) {
+    await runActivityIndicator(await freePort());
+    assert.deepEqual(rendererErrors, []);
+    return;
+  }
+  if (process.argv.includes("--floating-layout-only")) {
+    await runFloatingLayout(await freePort());
+    assert.deepEqual(rendererErrors, []);
+    return;
+  }
   if (process.argv.includes("--features-only") || process.argv.includes("--recurring-defaults-only")) {
     await runAutomationFeatures(await freePort());
     assert.deepEqual(rendererErrors, []);

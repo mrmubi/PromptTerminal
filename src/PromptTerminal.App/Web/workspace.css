@@ -14,6 +14,9 @@
   --danger: #ffb4b4;
   --success: #9cddb3;
   --warning: #f3d28a;
+  --working-red: #ff4d5e;
+  --working-highlight: #ffc29a;
+  --working-glow: #ff4d5e66;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -31,6 +34,9 @@
   --danger: #a52134;
   --success: #24633b;
   --warning: #765000;
+  --working-red: #c9253d;
+  --working-highlight: #ff765e;
+  --working-glow: #c9253d40;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -66,7 +72,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 .broadcast-button { color: var(--warning); }
 .broadcast-warning { background: var(--raised); border-bottom: 2px solid var(--warning); color: var(--warning); font-weight: 600; padding: 9px 18px; }
 #workspaces { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-.workspace { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; }
+.workspace { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .workspace.is-inactive { visibility: hidden; pointer-events: none; }
 .canvas { position: relative; min-width: 100%; min-height: 100%; }
 .pane { position: absolute; display: flex; flex-direction: column; overflow: visible; border: 1px solid var(--border); border-radius: 7px; background: var(--terminal); }
@@ -78,6 +84,26 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 .floating .pane-header { cursor: move; }
 .pane-name { flex: 1; min-width: 35px; overflow: hidden; text-overflow: ellipsis; font-weight: 600; background: transparent; border: 0; padding: 2px 3px; text-align: left; }
 .pane-header .icon-button, .pane-header summary { padding: 2px 6px; min-width: 25px; height: 25px; font-size: 12px; }
+@property --pane-working-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+.pane.is-working::before, .pane.is-working::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none;
+}
+.pane.is-working::before {
+  padding: 3px; z-index: 4;
+  background: conic-gradient(from var(--pane-working-angle), color-mix(in srgb, var(--working-red) 40%, transparent), var(--working-red) 55deg, var(--working-highlight) 95deg, var(--working-red) 135deg, color-mix(in srgb, var(--working-red) 40%, transparent) 185deg, var(--working-red) 260deg, var(--working-highlight) 300deg, color-mix(in srgb, var(--working-red) 40%, transparent));
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); mask-composite: exclude;
+  animation: pane-border-orbit 3s linear infinite;
+}
+.pane.is-working::after { box-shadow: 0 0 12px var(--working-glow); z-index: 3; }
+.pane.is-working .pane-header { border-top-color: var(--working-red); }
+.pane.is-working .pane-name { animation: pane-title-breathe 2.4s ease-in-out infinite; }
+@keyframes pane-border-orbit { to { --pane-working-angle: 360deg; } }
+@keyframes pane-title-breathe {
+  0%, 100% { opacity: 1; text-shadow: 0 0 0 transparent; }
+  50% { opacity: .86; text-shadow: 0 0 12px color-mix(in srgb, var(--working-red) 60%, transparent); }
+}
+.workspace.is-inactive .pane.is-working::before, .workspace.is-inactive .pane.is-working .pane-name,
+.pane.is-working.is-masked::before, .pane.is-working.is-masked .pane-name { animation-play-state: paused; }
 .pane-body { position: relative; flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 6px 6px; }
 .terminal-view { position: absolute; inset: 6px 4px 3px 7px; }
 .terminal-view .xterm { height: 100%; }
@@ -155,4 +181,13 @@ dialog::backdrop { background: #00000065; }
   .toolbar { gap: 4px; }
   .form-grid { grid-template-columns: 1fr; }
 }
-@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
+  .pane.is-working::before { animation: none; background: var(--working-red); }
+  .pane.is-working .pane-name { animation: none; }
+}
+@media (forced-colors: active) {
+  .pane.is-working::before { animation: none; background: Highlight; forced-color-adjust: none; }
+  .pane.is-working::after { box-shadow: none; }
+  .pane.is-working .pane-name { animation: none; }
+}

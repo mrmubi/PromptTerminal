@@ -29,7 +29,7 @@ public sealed record TabReference(Guid TabId);
 public sealed record PaneReference(Guid PaneId);
 public sealed record ItemReference(Guid Id);
 public sealed record NewTabOptions(string Name);
-public sealed record TabProperties(Guid TabId, string Name, string AccentColor);
+public sealed record TabProperties(Guid TabId, string Name, string AccentColor, bool? AutoArrangeFloating = null);
 public sealed record TabOrder(Guid TabId, int Index);
 public sealed record PaneCreation(Guid TabId, Guid? TargetPaneId, SplitAxis? Axis, bool? Floating, PaneDefinition Pane);
 public sealed record PaneSplit(Guid PaneId, SplitAxis Axis);
@@ -38,6 +38,7 @@ public sealed record PaneMove(Guid PaneId, Guid TabId);
 public sealed record PaneDock(Guid PaneId, Guid? TargetPaneId, SplitAxis Axis, bool Before);
 public sealed record SplitResize(Guid TabId, Guid NodeId, double Ratio);
 public sealed record FloatingBounds(Guid PaneId, double X, double Y, double Width, double Height);
+public sealed record WorkspaceViewport(double Width, double Height, double BrowserWidth);
 public sealed record TemplateCreation(Guid TabId, string Name);
 
 public static class WorkspaceCommands
@@ -52,7 +53,7 @@ public static class WorkspaceCommands
             {
                 var options = request.Read<NewTabOptions>();
                 var tab = WorkspaceLayout.AddTab(workspace, options.Name);
-                WorkspaceLayout.AddPane(tab, DefaultPane(document));
+                WorkspaceLayout.AddPane(tab, DefaultPane(document), floating: true);
                 break;
             }
             case "renameTab":
@@ -61,6 +62,7 @@ public static class WorkspaceCommands
                 var tab = FindTab(workspace, options.TabId);
                 tab.Name = options.Name;
                 tab.AccentColor = options.AccentColor;
+                if (options.AutoArrangeFloating is { } automatic) tab.AutoArrangeFloating = automatic;
                 break;
             }
             case "reorderTab":
@@ -100,10 +102,14 @@ public static class WorkspaceCommands
                 var pane = options.Pane;
                 pane.Id = Guid.NewGuid();
                 pane.Profile.Id = Guid.NewGuid();
-                WorkspaceLayout.AddPane(FindTab(workspace, options.TabId), pane, options.TargetPaneId, options.Axis, options.Floating);
+                var tab = FindTab(workspace, options.TabId);
+                var floating = options.Floating ?? true;
+                if (!floating) tab.AutoArrangeFloating = false;
+                WorkspaceLayout.AddPane(tab, pane, options.TargetPaneId, options.Axis, floating);
                 break;
             }
             case "splitPane":
+            case "duplicatePane":
             {
                 var options = request.Read<PaneSplit>();
                 var (tab, source) = FindPane(workspace, options.PaneId);
@@ -112,7 +118,17 @@ public static class WorkspaceCommands
                 pane.Profile.Id = Guid.NewGuid();
                 pane.Name = source.Name[..Math.Min(source.Name.Length, 90)] + " copy";
                 pane.Plan = new();
-                WorkspaceLayout.AddPane(tab, pane, source.Id, options.Axis, floating: false);
+                var floating = request.Type == "duplicatePane";
+                if (!floating) tab.AutoArrangeFloating = false;
+                WorkspaceLayout.AddPane(tab, pane, source.Id, options.Axis, floating);
+                break;
+            }
+            case "workspaceViewport":
+            {
+                var viewport = request.Read<WorkspaceViewport>();
+                if (!double.IsFinite(viewport.BrowserWidth) || viewport.BrowserWidth is < 1 or > 100_000)
+                    throw new InvalidDataException("Browser viewport width must be between 1 and 100,000 pixels.");
+                foreach (var tab in workspace.Tabs) FloatingLayout.Arrange(tab, viewport.Width, viewport.Height);
                 break;
             }
             case "editPane":

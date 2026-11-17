@@ -64,22 +64,32 @@ never silently replaced by another shell.
   explicit integration notifications, scheduled/dependent startup, deliberate
   broadcast input and shell-host CPU/memory indicators.
 - Opt-in keep-awake mode; reviewed hourly, daily, weekday and weekly agent tasks;
-  inherited pane placement and remembered main-window size/maximized state.
+  responsive floating grids and remembered main-window size/maximized state.
 
-Floating title bars are clamped to reachable positions after a viewport change.
+Automatic floating grids reflow when the window changes size; free-positioned
+floating title bars are clamped to reachable positions after a viewport change.
 Large tiled layouts scroll rather than shrinking terminals below usable bounds.
 For keyboard-only floating layout changes, edit Left/Top/Width/Height in pane
 configuration. Use **Tab options** to rename, color, reorder or duplicate a tab.
 Alt+drag a floating title bar over a tiled pane to preview docking, or use its
 **Dock with placement preview** action.
 
-New panes default to the existing presentation: when a floating panel exists,
-the new panel copies its size and is placed beside it (preferring the active
-floating panel). Uncheck **Create as floating panel** for a deliberate tiled
-pane. Tiled additions inherit the target's split direction; explicit **Split
-right / below** still creates a tiled split. Window size is saved in logical
-pixels, with normal restore dimensions retained when maximized or minimized.
-Restored dimensions are constrained to the current Windows work area.
+New panes and duplicates **float by default**, even in a tiled-only tab. They
+append after the last pane, not the most recently focused pane. By default,
+adding a floating pane brings all panes in that tab into an equal-sized grid,
+so no tiled panes are hidden underneath. The main window widens to make room
+without exceeding the current monitor's work area or changing its height.
+At the width limit, or when you resize the window yourself, panes reflow into
+rows and columns. Adding a pane never unmaximizes the window.
+
+Use **Tab options > Auto-arrange floating panes in an equal grid** to turn
+automatic reflow off for persistent free positioning, or back on to restore it.
+Manual pane moves/resizes in automatic mode last until the next reflow.
+Uncheck **Create as floating panel**, explicitly **Split right / below**, or
+**Dock** to opt that tab into manual hybrid layout instead. Tiled additions
+inherit the target's split direction. Window size is saved in logical pixels,
+with normal restore dimensions retained when maximized or minimized. Restored
+dimensions are constrained to the current Windows work area.
 
 Launch/profile/plan edits apply to future launches, not existing processes or an
 already reviewed queued launch or armed schedule. Cancel and re-arm to apply edits.
@@ -103,6 +113,15 @@ Send-PromptTerminalSignal -State directory -Message $PWD.Path
 
 Running means that the shell host is alive, not that an agent is working.
 Output, silence and exit codes are never guessed to be task completion.
+Terminal output automatically shows a rotating 3-pixel red/coral border with a
+soft glow, highlights the title bar in red and gently fades the title. This works
+for manual and scheduled runs without shell integration or signal commands.
+The animation stops after **two seconds without new output**, or immediately
+when the process stops. Empty/replayed/stale output and state refreshes do not
+keep it active. This is only an output-activity hint: it does not change explicit
+working/waiting/completed signals, infer completion or release dependent tasks.
+Reduced-motion and high-contrast preferences use a steady activity border
+instead; animations pause in hidden tabs and masked panes.
 Current directory/branch information requires the explicit `directory` signal;
 otherwise the footer is labeled **Initial**. Metrics describe the shell host,
 not the aggregate process tree.
@@ -246,19 +265,24 @@ npm run test:desktop
 npm run test:desktop -- .\artifacts\publish\win-x64\PromptTerminal.App.exe
 ```
 
-For just the keep-awake, recurring-task, inherited-placement and window-restore
+For just the keep-awake, recurring-task, floating-placement and window-restore
 desktop checks, append `--features-only` (an executable path is optional).
 These checks also cover reviewed add-and-start, canceled/invalid pane creation,
 and hourly schedule arming at the next local hour.
 Use `--recurring-defaults-only` to focus on recurring manual-launch auto-close,
 normal interactive prompts, reviewed add-and-start and actual scheduled/busy runs.
+Use `--floating-layout-only` for native default-floating creation, duplication,
+equal grid reflow, monitor-limited window growth, normal/maximized restore and
+live process/terminal-history preservation.
+Use `--activity-only` for real manual and scheduled output with integration
+disabled, idle-shell exclusion, reduced-motion handling and cleanup after exit.
 
 The browser tests use locally installed Microsoft Edge. The desktop smoke test
 requires an interactive Windows desktop and the Debug build. It checks twelve
 real concurrent sessions, focused input, Unicode, live layout/theme changes,
 restart generation rejection, explicit dependencies, renderer recovery,
 partial failures, real recurring launches/busy skips, keep-awake toggling,
-inherited floating placement, window-size restore and stopped/unarmed restore.
+floating placement, window-size restore and stopped/unarmed restore.
 It temporarily enables **loopback-only**
 WebView2 debugging for that test process; normal launches do not enable it.
 It can briefly run thirteen shells, so allow sufficient resources.

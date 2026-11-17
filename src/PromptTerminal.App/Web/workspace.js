@@ -11,7 +11,7 @@
   const splitterRects = new Map();
   const paneRects = new Map();
   const workspaceMutations = new Set([
-    "newTab", "renameTab", "reorderTab", "selectTab", "closeTab", "duplicateTab", "addPane", "addStartedPane", "splitPane",
+    "newTab", "renameTab", "reorderTab", "selectTab", "closeTab", "duplicateTab", "addPane", "addStartedPane", "splitPane", "duplicatePane",
     "editPane", "focusPane", "closePane", "toggleFloat", "dockPane", "movePane", "resizeSplit",
     "floatingBounds", "readOnly", "settings", "saveProfile", "deleteProfile", "saveSnippet",
     "deleteSnippet", "saveTemplate", "applyTemplate", "deleteTemplate"
@@ -24,10 +24,13 @@
   let dialogSubmit;
   let dialogCleanup;
   let refreshSchedules;
+  let viewportTimer;
+  let viewportKey = "";
   let lastTerminalFocus = false;
   let settingsKey = "";
   const gap = 8;
   const inset = 10;
+  const outputActivityMilliseconds = 2000;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -155,6 +158,10 @@
       post("rendererError", { text: "Terminal output arrived out of order. Output is paused; no batch was discarded." });
       return;
     }
+    if (message.text.length) {
+      pane.outputActiveUntil = performance.now() + outputActivityMilliseconds;
+      updatePaneActivity(pane);
+    }
     pane.pendingSequence = message.sequence;
     const generation = pane.generation;
     pane.terminal.write(message.text, () => {
@@ -163,6 +170,22 @@
       pane.pendingSequence = 0;
       post("outputAck", { sequence: message.sequence }, pane.id, generation);
     });
+  }
+
+  function updatePaneActivity(pane) {
+    clearTimeout(pane.activityTimer);
+    pane.activityTimer = null;
+    const runtime = runtimeFor(pane.id);
+    if (runtime.state !== "running") {
+      if (runtime.state !== "starting") pane.outputActiveUntil = 0;
+      pane.article.classList.remove("is-working");
+      return;
+    }
+    const remaining = pane.outputActiveUntil - performance.now();
+    pane.article.classList.toggle("is-working", remaining > 0);
+    if (remaining > 0) pane.activityTimer = setTimeout(() => {
+      if (panes.get(pane.id) === pane) updatePaneActivity(pane);
+    }, Math.ceil(remaining));
   }
 
   function renderState(message) {
@@ -183,6 +206,7 @@
     for (const [id, pane] of panes) {
       if (allPaneIds.has(id)) continue;
       clearTimeout(pane.resizeTimer);
+      clearTimeout(pane.activityTimer);
       pane.terminal.dispose();
       pane.article.remove();
       panes.delete(id);
@@ -198,6 +222,7 @@
         let pane = panes.get(definition.id);
         if (pane && pane.generation !== runtimeFor(definition.id).generation) {
           clearTimeout(pane.resizeTimer);
+          clearTimeout(pane.activityTimer);
           pane.terminal.dispose();
           pane.article.remove();
           panes.delete(definition.id);
@@ -217,6 +242,7 @@
     if (!drag) renderLayouts();
     if (lastTerminalFocus) focusActive();
     refreshSchedules?.();
+    scheduleViewportUpdate();
   }
 
   function renderTabs() {
@@ -344,7 +370,7 @@
     const pane = {
       id: definition.id, article, header, title, start, maximize, float, close, cover, status, path, signal, schedule, metrics,
       terminal, fit, search, serialize, generation: 0, lastSequence: 0, pendingSequence: 0,
-      lastSize: "", resizeTimer: null
+      lastSize: "", resizeTimer: null, outputActiveUntil: 0, activityTimer: null
     };
     panes.set(pane.id, pane);
     applyTerminalSettings(pane);
@@ -376,6 +402,8 @@
     const runtime = runtimeFor(pane.id);
     if (runtime.generation !== pane.generation) {
       clearTimeout(pane.resizeTimer);
+      clearTimeout(pane.activityTimer);
+      pane.outputActiveUntil = 0;
       pane.generation = runtime.generation;
       pane.lastSequence = 0;
       pane.pendingSequence = 0;
@@ -388,6 +416,7 @@
     pane.article.style.setProperty("--pane-accent", definition.profile.accentColor);
     pane.article.classList.toggle("active", tab.activePaneId === pane.id);
     pane.article.classList.toggle("floating", tab.floating.some(item => item.paneId === pane.id));
+    updatePaneActivity(pane);
     pane.title.textContent = definition.name;
     pane.title.title = `${definition.name} - edit future launch settings`;
     pane.terminal.textarea.setAttribute("aria-label", `${definition.name} terminal`);
@@ -477,12 +506,11 @@
     if (!state) return;
     paneRects.clear();
     splitterRects.clear();
-    const viewport = $("#workspaces");
     for (const tab of state.document.workspace.tabs) {
       const view = tabs.get(tab.id);
       const size = minimum(tab.root);
-      const width = Math.max(320, viewport.clientWidth - inset * 2);
-      const height = Math.max(210, viewport.clientHeight - inset * 2);
+      const width = Math.max(320, view.section.clientWidth - inset * 2);
+      const height = Math.max(210, view.section.clientHeight - inset * 2);
       const rootRect = { x: inset, y: inset, width: Math.max(width, size.width), height: Math.max(height, size.height) };
       const usedSplitters = new Set();
       const maximized = state.maximized[tab.id];
@@ -490,8 +518,8 @@
       for (const floating of tab.floating) {
         const pane = panes.get(floating.paneId);
         const bounds = {
-          x: clamp(floating.x, 0, Math.max(0, width - 100)),
-          y: clamp(floating.y, 0, Math.max(0, height - 35)),
+          x: tab.autoArrangeFloating === false ? clamp(floating.x, 0, Math.max(0, width - 100)) : floating.x,
+          y: tab.autoArrangeFloating === false ? clamp(floating.y, 0, Math.max(0, height - 35)) : floating.y,
           width: floating.width, height: floating.height
         };
         position(pane.article, bounds);
@@ -518,6 +546,22 @@
       view.canvas.style.height = `${maximized ? height + inset * 2 : maxY}px`;
     }
     scheduleFits();
+  }
+
+  function scheduleViewportUpdate() {
+    clearTimeout(viewportTimer);
+    const report = () => {
+      if (!state || drag) return;
+      const view = tabs.get(activeTab().id);
+      if (!view || view.section.clientWidth < 1 || view.section.clientHeight < 1) return;
+      const data = { width: view.section.clientWidth, height: view.section.clientHeight, browserWidth: window.innerWidth };
+      const key = JSON.stringify(data);
+      if (key === viewportKey) return;
+      viewportKey = key;
+      post("workspaceViewport", data);
+    };
+    if (!viewportKey) report();
+    else viewportTimer = setTimeout(report, 100);
   }
 
   function layoutNode(node, rect, tab, view, used) {
@@ -675,6 +719,7 @@
     if (!drag) return;
     const finished = drag;
     drag = null;
+    scheduleViewportUpdate();
     hideDockPreviews();
     if (cancelled) { renderLayouts(); return; }
     safely(async () => {
@@ -815,7 +860,10 @@
         inputs.enableIntegration = checkbox(grid, "enableIntegration", "Enable explicit shell integration signals", profile.enableIntegration);
         if (!profileOnly) {
           inputs.readOnly = checkbox(grid, "readOnly", "Read-only monitoring (blocks input and interrupt)", definition?.readOnly);
-          if (!definition) inputs.floating = checkbox(grid, "floating", "Create as floating panel", tab.floating.length > 0);
+          if (!definition) {
+            inputs.floating = checkbox(grid, "floating", "Create as floating panel", true);
+            body.append(element("p", "form-note", "New panes float by default and append after the last pane. Automatic floating grids include all panes in this tab and adapt to the window. A tiled override switches this tab to free positioning; re-enable the grid in Tab options."));
+          }
           inputs.notBefore = field(grid, "notBefore", "Optional earliest launch time", "datetime-local",
             definition?.plan.notBefore ? localDateTime(definition.plan.notBefore) : "");
           inputs.afterPaneId = field(grid, "afterPaneId", "Wait for explicit completed signal from", "select", definition?.plan.afterPaneId || "", {
@@ -911,6 +959,8 @@
       body.append(grid);
       field(grid, "name", "Tab name", "text", tab.name, { required: true, maxLength: 100 });
       field(grid, "accentColor", "Tab accent", "color", tab.accentColor);
+      checkbox(grid, "autoArrangeFloating", "Auto-arrange floating panes in an equal grid", tab.autoArrangeFloating !== false);
+      body.append(element("p", "form-note", "With floating panes present, the grid includes every pane so none are hidden underneath. Window resizing reflows equal rows and columns. Tiled creation, explicit splits or docking switches the grid off for this tab; enable it here again for automatic arrangement."));
       const row = element("div", "list-row");
       for (const [text, action] of [["Move left", "left"], ["Move right", "right"], ["Duplicate tab", "duplicate"], ["Close tab", "close"]]) {
         const item = element("button", "", text);
@@ -927,7 +977,8 @@
         row.append(item);
       }
       body.append(row);
-    }, data => command("renameTab", { tabId: id, name: data.get("name").trim(), accentColor: data.get("accentColor") }));
+    }, data => command("renameTab", { tabId: id, name: data.get("name").trim(), accentColor: data.get("accentColor"),
+      autoArrangeFloating: data.has("autoArrangeFloating") }));
   }
 
   function openSettings() {
@@ -1227,7 +1278,8 @@
       case "splitVertical":
       case "duplicatePane":
         if (!paneId) return openPaneEditor();
-        return command("splitPane", { paneId, axis: action === "splitVertical" ? "vertical" : "horizontal" });
+        return command(action === "duplicatePane" ? "duplicatePane" : "splitPane",
+          { paneId, axis: action === "splitVertical" ? "vertical" : "horizontal" });
       case "startWorkspace": return command("startWorkspace", { tabId: tab.id });
       case "startPane":
       case "restartPane":
@@ -1370,6 +1422,7 @@
     frame = requestAnimationFrame(() => {
       frame = 0;
       if (!drag) renderLayouts();
+      scheduleViewportUpdate();
     });
   });
   observer.observe($("#workspaces"));

@@ -16,8 +16,7 @@ public static class WorkspaceLayout
         if (tab.Panes.Any(p => p.Id == pane.Id)) throw new InvalidOperationException("The pane already belongs to this tab.");
         if (target is not null && !tab.Panes.Any(p => p.Id == target)) throw new InvalidOperationException("The target pane does not exist.");
         target ??= tab.ActivePaneId;
-        var neighbor = tab.Floating.SingleOrDefault(f => f.PaneId == target)
-            ?? tab.Floating.OrderBy(f => f.Z).LastOrDefault();
+        var neighbor = tab.Floating.LastOrDefault();
         if (floating ?? neighbor is not null)
         {
             tab.Floating.Add(new FloatingPane
@@ -65,8 +64,12 @@ public static class WorkspaceLayout
     public static void ToggleFloating(WorkspaceTab tab, Guid id)
     {
         var floating = tab.Floating.Any(f => f.PaneId == id);
+        var index = tab.Panes.FindIndex(p => p.Id == id);
         var pane = RemovePane(tab, id);
+        if (floating) tab.AutoArrangeFloating = false;
         AddPane(tab, pane, floating: !floating);
+        tab.Panes.RemoveAt(tab.Panes.Count - 1);
+        tab.Panes.Insert(index, pane);
     }
 
     public static void Dock(WorkspaceTab tab, Guid id, Guid? target, SplitAxis axis, bool before)
@@ -74,8 +77,12 @@ public static class WorkspaceLayout
         if (id == target) throw new InvalidOperationException("A pane cannot dock into itself.");
         if (target is Guid targetId && FindLeaf(tab.Root, targetId) is null)
             throw new InvalidOperationException("Docking requires a tiled target pane.");
+        var index = tab.Panes.FindIndex(p => p.Id == id);
         var pane = RemovePane(tab, id);
-        AddPane(tab, pane, target, axis, before: before);
+        tab.AutoArrangeFloating = false;
+        AddPane(tab, pane, target, axis, floating: false, before: before);
+        tab.Panes.RemoveAt(tab.Panes.Count - 1);
+        tab.Panes.Insert(index, pane);
     }
 
     public static void MovePane(WorkspaceTab source, WorkspaceTab destination, Guid id)

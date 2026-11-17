@@ -93,10 +93,19 @@ worktrees for agents making independent changes.
 - Bring a floating panel to the front when selected.
 - Temporarily maximize a pane, then restore its previous position and size.
 - Preserve terminal focus and process identity during layout changes.
-- Keep floating title bars reachable after window resizing or DPI changes.
-- Default new panes to the current floating format when present, preserving
-  panel size and placing them alongside; otherwise inherit tiled split
-  direction. Explicit floating/tiled and right/below choices remain available.
+- Default new panes and duplicates to floating panels, even with no existing
+  floats. Append in creation order, independent of focus or front-to-back order.
+- Enable an equal-sized automatic floating grid per tab by default. Once a float
+  exists, include all panes in that tab instead of obscuring tiled panes below it.
+- On floating additions, widen the normal main window to accommodate panels,
+  constrained to the current monitor's work area. Never shrink it, change its
+  height, or restore a maximized window to do this.
+- Reflow the grid into rows and columns on user window resizing and DPI changes,
+  preserving process identities, terminal instances, history and pane order.
+- Expose a saved per-tab automatic-grid toggle. Explicit tiled creation,
+  splitting or docking disables automatic reflow for that tab until re-enabled.
+  Manual floating moves/resizes in grid mode last until the next reflow.
+  Keep free-positioned title bars reachable after window resizing or DPI changes.
 - Apply minimum usable pane dimensions. When the available area is insufficient,
   provide workspace scrolling or a clear layout adjustment rather than hiding
   panels or shrinking terminals to zero.
@@ -193,6 +202,20 @@ Session states:
 `Running` does not mean that an agent is actively working. Silence does not mean
 completion, failure, or waiting for approval. Reliable agent-specific states
 require explicit integrations or launch wrappers, introduced separately.
+
+New terminal output on a running session automatically animates a non-interactive
+red/coral gradient around a 3-pixel pane border, adds a soft glow and red title-bar
+highlight, and gently fades its title. This applies to manual and scheduled runs
+without requiring shell integration. Stop the indicator after two seconds with
+no new output, or immediately when the process stops. Empty, replayed and
+old-generation output must not refresh activity. Keep activity ephemeral and
+clear its timers when a pane closes or changes generation.
+
+Output activity is a visual hint only: neither output nor silence changes the
+agent's explicit working/waiting/completed signals, marks a task completed, or
+unblocks a dependent launch. Respect reduced-motion and high-contrast preferences
+with a steady activity indicator, and pause animations for hidden tabs or
+temporarily masked panes.
 
 ### FR-06: Save, reopen, and recover workspaces
 

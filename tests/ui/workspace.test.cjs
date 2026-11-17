@@ -84,6 +84,196 @@ test("mounts twelve independent terminal views without auto-starting shells", as
   }, documentFixture(3, 4));
 });
 
+test("live output animates automatically without changing explicit signals, terminal instances or history", async () => {
+  await withPage(async (page, fixture) => {
+    await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    const pane = page.locator(`.pane[data-pane-id="${id}"]`);
+    await page.evaluate(id => {
+      window.__host.running();
+      window.__workingTerminal = document.querySelector(`.pane[data-pane-id="${id}"] .xterm`);
+    }, id);
+    const appearance = () => pane.evaluate(node => ({
+      working: node.classList.contains("is-working"),
+      border: getComputedStyle(node, "::before").animationName,
+      title: getComputedStyle(node.querySelector(".pane-name")).animationName,
+      opacity: Number(getComputedStyle(node.querySelector(".pane-name")).opacity)
+    }));
+    assert.deepEqual(await appearance(), { working: false, border: "none", title: "none", opacity: 1 });
+    await emitOutput(page, id, "working-animation-history\r\n");
+    for (const signal of ["working", "waiting", "working", "completed", null]) {
+      await page.evaluate(({ id, signal }) => {
+        window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).signal = signal;
+        window.__host.publish();
+      }, { id, signal });
+      const actual = await appearance();
+      assert.equal(actual.working, true);
+      assert.equal(actual.border, "pane-border-orbit");
+      assert.equal(actual.title, "pane-title-breathe");
+      assert.equal(await pane.evaluate(node => getComputedStyle(node, "::after").boxShadow !== "none"), true);
+      assert.ok(actual.opacity >= .85 && actual.opacity <= 1);
+      assert.equal(await page.locator(".pane.is-working").count(), 1);
+      assert.equal(await pane.locator(".pane-signal").textContent(), signal ? `Integration: ${signal}` : "");
+    }
+    for (const state of ["queued", "starting", "stopping", "exited", "failed", "notStarted"]) {
+      await page.evaluate(({ id, state }) => {
+        Object.assign(window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id), { signal: "working", state });
+        window.__host.publish();
+      }, { id, state });
+      assert.deepEqual(await appearance(), { working: false, border: "none", title: "none", opacity: 1 });
+    }
+    await page.evaluate(id => {
+      Object.assign(window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id), { state: "running", signal: null });
+      window.__host.publish();
+    }, id);
+    assert.equal(await page.evaluate(id => window.__workingTerminal ===
+      document.querySelector(`.pane[data-pane-id="${id}"] .xterm`), id), true);
+    assert.match(await transcript(page, id), /working-animation-history/);
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message => ["startPane", "restartPane"].includes(message.type))), false);
+  });
+});
+
+test("output activity expires at two quiet seconds and ignores state refreshes, replays and empty output", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    const pane = page.locator(`.pane[data-pane-id="${id}"]`);
+    await page.clock.install();
+    await page.clock.pauseAt(new Date(Date.now() + 60000));
+    await page.evaluate(id => {
+      window.__host.running();
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 1, text: "First output\r\n" });
+    }, id);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
+    await page.clock.runFor(1000);
+    await page.evaluate(id => {
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 2, text: "More output\r\n" });
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).signal = "working";
+      window.__host.publish();
+    }, id);
+    await page.clock.runFor(1999);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
+    await page.clock.runFor(1);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+    assert.equal(await pane.locator(".pane-signal").textContent(), "Integration: working",
+      "Visual inactivity does not change the integration's reported state");
+    await page.evaluate(id => {
+      window.__host.emit({ type: "output", paneId: id, generation: 0, sequence: 3, text: "STALE" });
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 2, text: "REPLAY" });
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 3, text: "" });
+      window.__host.publish();
+    }, id);
+    await page.clock.runFor(10);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+    assert.equal(await page.evaluate(id => window.__host.messages.some(message =>
+      message.type === "outputAck" && message.paneId === id && message.data.sequence === 3), id), true);
+  });
+});
+
+test("output activity survives startup ordering but cannot leak across generations, exits or pane removal", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    const pane = page.locator(`.pane[data-pane-id="${id}"]`);
+    await page.clock.install();
+    await page.evaluate(id => {
+      window.__host.running();
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 1, text: "Old session\r\n" });
+    }, id);
+    await page.clock.runFor(1000);
+    await page.evaluate(id => {
+      Object.assign(window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id), { generation: 2, state: "starting" });
+      window.__host.publish();
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 2, text: "STALE" });
+      window.__host.emit({ type: "output", paneId: id, generation: 2, sequence: 1, text: "New session startup\r\n" });
+    }, id);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+    await page.evaluate(id => {
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).state = "running";
+      window.__host.publish();
+    }, id);
+    await page.clock.runFor(1000);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
+    await page.evaluate(id => {
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).state = "exited";
+      window.__host.publish();
+    }, id);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+    await page.evaluate(id => {
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).state = "running";
+      window.__host.publish();
+    }, id);
+    assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
+    await page.evaluate(id => {
+      window.__host.emit({ type: "output", paneId: id, generation: 2, sequence: 2, text: "Fresh activity\r\n" });
+      const tab = window.__host.snapshot.document.workspace.tabs[0];
+      tab.panes = tab.panes.filter(pane => pane.id !== id);
+      tab.root = tab.root.second;
+      tab.activePaneId = tab.panes[0].id;
+      window.__host.publish();
+    }, id);
+    assert.equal(await pane.count(), 0);
+    await page.clock.runFor(2001);
+    assert.equal(await page.locator(".pane.is-working").count(), 0);
+  });
+});
+
+test("working borders rotate and titles subtly breathe in both themes with accessible static alternatives", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    const pane = page.locator(`.pane[data-pane-id="${id}"]`);
+    await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+    await page.evaluate(() => window.__host.running());
+    let sequence = 0;
+    for (const theme of ["dark", "light"]) {
+      await emitOutput(page, id, "Activity without integration signals\r\n", ++sequence);
+      await page.evaluate(theme => window.__host.publish({ resolvedTheme: theme }), theme);
+      const angle = await pane.evaluate(node => getComputedStyle(node, "::before").getPropertyValue("--pane-working-angle"));
+      await page.waitForFunction(({ id, angle }) => {
+        const node = document.querySelector(`.pane[data-pane-id="${id}"]`);
+        return getComputedStyle(node, "::before").getPropertyValue("--pane-working-angle") !== angle;
+      }, { id, angle });
+      const fade = await pane.locator(".pane-name").evaluate(node => {
+        const animation = node.getAnimations().find(animation => animation.animationName === "pane-title-breathe");
+        animation.pause();
+        animation.currentTime = animation.effect.getTiming().duration / 2;
+        return { opacity: Number(getComputedStyle(node).opacity), duration: animation.effect.getTiming().duration };
+      });
+      assert.ok(fade.opacity >= .85 && fade.opacity <= .9);
+      assert.ok(fade.duration >= 2000);
+      const border = await pane.evaluate(node => ({
+        thickness: getComputedStyle(node, "::before").paddingTop,
+        gradient: getComputedStyle(node, "::before").backgroundImage,
+        headerColor: getComputedStyle(node.querySelector(".pane-header")).borderTopColor,
+        glow: getComputedStyle(node, "::after").boxShadow,
+        pointerEvents: [getComputedStyle(node, "::before").pointerEvents, getComputedStyle(node, "::after").pointerEvents]
+      }));
+      assert.equal(border.thickness, "3px");
+      assert.equal(border.headerColor, theme === "dark" ? "rgb(255, 77, 94)" : "rgb(201, 37, 61)");
+      assert.ok(border.gradient.includes(border.headerColor));
+      assert.notEqual(border.glow, "none");
+      assert.deepEqual(border.pointerEvents, ["none", "none"]);
+    }
+    await emitOutput(page, id, "Activity for accessibility checks\r\n", ++sequence);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    assert.deepEqual(await pane.evaluate(node => ({
+      border: getComputedStyle(node, "::before").animationName,
+      title: getComputedStyle(node.querySelector(".pane-name")).animationName,
+      opacity: getComputedStyle(node.querySelector(".pane-name")).opacity,
+      background: getComputedStyle(node, "::before").backgroundImage
+    })), { border: "none", title: "none", opacity: "1", background: "none" });
+    assert.equal(await pane.locator(".pane-signal").textContent(), "");
+    await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "active" });
+    assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationName), "none");
+    assert.equal(await pane.evaluate(node => getComputedStyle(node, "::after").boxShadow), "none");
+    assert.equal(await pane.locator(".pane-name").evaluate(node => getComputedStyle(node).animationName), "none");
+    await page.emulateMedia({ forcedColors: "none" });
+    await page.getByRole("tab").nth(1).click();
+    assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationPlayState), "paused");
+    assert.equal(await pane.locator(".pane-name").evaluate(node => getComputedStyle(node).animationPlayState), "paused");
+    await page.getByRole("tab").first().click();
+    assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationPlayState), "running");
+  });
+});
+
 test("processes ANSI/Unicode in order, acknowledges parsed batches and rejects stale generations", async () => {
   await withPage(async (page, fixture) => {
     const id = fixture.workspace.tabs[0].panes[0].id;
@@ -267,6 +457,67 @@ test("new panes default to the existing floating format and allow a deliberate t
     }
     assert.equal(await page.evaluate(() => window.__host.messages.some(message =>
       ["startPane", "armSchedule"].includes(message.type))), false);
+  }, fixture);
+});
+
+test("new panes default to floating in a tiled-only workspace, and duplicates use the floating creation path", async () => {
+  await withPage(async (page, fixture) => {
+    await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+    assert.equal(await page.getByLabel("Create as floating panel").isChecked(), true);
+    await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__host.messages.filter(message => message.type === "addPane").at(-1).data.floating), true);
+    const pane = page.locator(`.pane[data-pane-id="${fixture.workspace.tabs[0].panes[0].id}"]`);
+    await pane.locator("summary").click();
+    await pane.getByRole("button", { name: "Duplicate as new pane", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__host.messages.filter(message => message.type === "duplicatePane").length), 1);
+    assert.equal(await page.evaluate(() => window.__host.messages.filter(message => message.type === "splitPane").length), 0);
+  });
+});
+
+test("viewport reports drive equal floating rows and columns without replacing terminals", async () => {
+  const fixture = documentFixture(1, 6);
+  const tab = fixture.workspace.tabs[0];
+  tab.root = null;
+  tab.floating = tab.panes.map((pane, index) => ({ paneId: pane.id, x: index * 100, y: 10, width: 600, height: 360, z: index + 1 }));
+  await withPage(async page => {
+    await page.evaluate(() => {
+      window.__host.running();
+      window.__floatingTerminals = Array.from(document.querySelectorAll(".pane"), pane =>
+        [pane.dataset.paneId, pane.querySelector(".xterm")]);
+      window.__host.responsiveFloating = true;
+    });
+    for (const [width, columns, rows] of [[1900, 3, 2], [1000, 2, 3]]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.waitForFunction(({ width, columns, rows }) => {
+        const messages = window.__host.messages.filter(message => message.type === "workspaceViewport");
+        const placements = window.__host.snapshot.document.workspace.tabs[0].floating;
+        return messages.at(-1)?.data.browserWidth === width &&
+          new Set(placements.map(item => item.x)).size === columns &&
+          new Set(placements.map(item => item.y)).size === rows;
+      }, { width, columns, rows });
+      const actual = await page.locator(".pane.floating").evaluateAll(panes => panes.map(pane =>
+        ({ x: pane.offsetLeft, y: pane.offsetTop, width: pane.offsetWidth, height: pane.offsetHeight })));
+      assert.equal(new Set(actual.map(item => item.width)).size, 1);
+      assert.equal(new Set(actual.map(item => item.height)).size, 1);
+      for (let first = 0; first < actual.length; first++) for (let second = first + 1; second < actual.length; second++) {
+        const a = actual[first], b = actual[second];
+        assert.equal(a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y, false);
+      }
+      assert.equal(await page.evaluate(() => window.__floatingTerminals.every(([id, terminal]) =>
+        terminal === document.querySelector(`.pane[data-pane-id="${id}"] .xterm`))), true);
+    }
+    const header = await page.locator(".pane.floating .pane-header").first().boundingBox();
+    await page.mouse.move(header.x + 3, header.y + 16);
+    await page.mouse.down();
+    await page.setViewportSize({ width: 1400, height: 1000 });
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await page.waitForFunction(() => window.__host.messages.filter(message => message.type === "workspaceViewport")
+      .at(-1)?.data.browserWidth === 1400);
+    await page.getByRole("button", { name: "Tab options", exact: true }).click();
+    await page.getByLabel("Auto-arrange floating panes in an equal grid").uncheck();
+    await page.getByRole("button", { name: "Save tab", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__host.snapshot.document.workspace.tabs[0].autoArrangeFloating), false);
   }, fixture);
 });
 

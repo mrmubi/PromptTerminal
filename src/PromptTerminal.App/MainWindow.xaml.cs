@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private readonly HashSet<Guid> _unread = [];
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private ApplicationDocument _document = WorkspaceDefaults.Create();
+    private WorkspaceViewport? _workspaceViewport;
     private CancellationTokenSource? _saveDelay;
     private Task _saveTask = Task.CompletedTask;
     private bool _ready, _initializing, _checkingQueue, _shuttingDown, _allowClose;
@@ -232,6 +233,7 @@ public partial class MainWindow : Window
                 AppendLaunchPreview(preview, pane, launch.Profile, null);
                 if (!Confirm("Add and start pane", preview.ToString(), "Add and start reviewed pane")) return false;
                 if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
+                UpdateFloatingLayout(updated, growWindow: true);
                 updated.MainWindow = _document.MainWindow;
                 _document = updated;
                 ScheduleSave();
@@ -384,11 +386,34 @@ public partial class MainWindow : Window
     {
         var updated = WorkspaceCommands.Apply(_document, request);
         if (request.Type == "settings") _keepAwake.SetEnabled(updated.Settings.PreventSleep);
+        if (request.Type == "workspaceViewport") _workspaceViewport = request.Read<WorkspaceViewport>();
+        UpdateFloatingLayout(updated, request.Type is "addPane" or "duplicatePane" or "toggleFloat" or "movePane");
+        updated.MainWindow = _document.MainWindow;
         _document = updated;
         foreach (var tabId in _maximized.Keys.ToArray())
             if (!_document.Workspace.Tabs.Any(t => t.Id == tabId && t.Panes.Any(p => p.Id == _maximized[tabId])))
                 _maximized.Remove(tabId);
         ScheduleSave();
+    }
+
+    private void UpdateFloatingLayout(ApplicationDocument updated, bool growWindow, bool arrangeAll = false)
+    {
+        if (_workspaceViewport is null) return;
+        var changed = updated.Workspace.Tabs.Where(tab =>
+        {
+            var before = _document.Workspace.Tabs.SingleOrDefault(item => item.Id == tab.Id);
+            return arrangeAll || before is null || before.AutoArrangeFloating != tab.AutoArrangeFloating ||
+                !before.Panes.Select(item => item.Id).SequenceEqual(tab.Panes.Select(item => item.Id)) ||
+                !before.Floating.Select(item => item.PaneId).SequenceEqual(tab.Floating.Select(item => item.PaneId));
+        }).ToArray();
+        var active = changed.SingleOrDefault(tab => tab.Id == updated.Workspace.ActiveTabId);
+        var previous = _document.Workspace.Tabs.SingleOrDefault(tab => tab.Id == active?.Id);
+        if (growWindow && active is not null && active.Floating.Any(item =>
+                previous is null || previous.Floating.All(old => old.PaneId != item.PaneId)))
+            _workspaceViewport = WindowSizing.GrowForPanes(this, Browser, _workspaceViewport,
+                active.AutoArrangeFloating ? active.Panes.Count : active.Floating.Count);
+        foreach (var tab in changed) FloatingLayout.Arrange(tab, _workspaceViewport.Width, _workspaceViewport.Height);
+        WorkspaceValidator.Validate(updated);
     }
 
     private async Task<bool> QueueStartsAsync(PaneDefinition[] panes, bool resume)
@@ -809,6 +834,7 @@ public partial class MainWindow : Window
         _saveDelay?.Cancel();
         await _saveTask;
         PreserveOriginal();
+        UpdateFloatingLayout(restored, growWindow: false, arrangeAll: true);
         await _store.SaveAsync(restored);
         _document = restored;
         _persistenceEnabled = true;
@@ -843,7 +869,10 @@ public partial class MainWindow : Window
         _runtimes.Clear();
         _maximized.Clear();
         _unread.Clear();
-        _document.Workspace = workspace;
+        var updated = WorkspaceJson.Clone(_document);
+        updated.Workspace = workspace;
+        UpdateFloatingLayout(updated, growWindow: false, arrangeAll: true);
+        _document = updated;
         ScheduleSave();
         await PublishStateAsync();
         return true;
