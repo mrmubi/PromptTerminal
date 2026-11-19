@@ -181,7 +181,11 @@
       pane.article.classList.remove("is-working");
       return;
     }
-    const remaining = pane.outputActiveUntil - performance.now();
+    if (runtime.signal === "working" || runtime.signal === "waiting") {
+      pane.article.classList.add("is-working");
+      return;
+    }
+    const remaining = runtime.signal === "completed" ? 0 : pane.outputActiveUntil - performance.now();
     pane.article.classList.toggle("is-working", remaining > 0);
     if (remaining > 0) pane.activityTimer = setTimeout(() => {
       if (panes.get(pane.id) === pane) updatePaneActivity(pane);
@@ -196,6 +200,9 @@
     for (const runtime of message.runtimes) runtimes.set(runtime.paneId, runtime);
     document.documentElement.dataset.theme = message.resolvedTheme;
     $("#save-status").textContent = message.saveStatus;
+    $("#save-status").title = message.storage
+      ? `${message.storage.path}\n${message.storage.isOneDrive ? "OneDrive folder; changes load on app startup. Upload status is managed by OneDrive." : "Local storage; this folder is not automatically synced by the app."}`
+      : "";
     $("#power-status").textContent = message.keepAwakeEnabled ? "Keep-awake on" : "Sleep allowed";
     $("#power-status").title = "Keep-awake prevents automatic idle sleep/hibernation only while this app is open. The display can still turn off.";
     const nextSettingsKey = JSON.stringify([message.document.settings, message.resolvedTheme]);
@@ -997,6 +1004,11 @@
         body.append(element("p", "form-note", "Ctrl+Shift+C: copy selection. Ctrl+V / Ctrl+Shift+V / Shift+Insert: confirmed native paste. Ctrl+C: terminal interrupt. Shortcuts can be removed from the JSON to let the shell receive those keys."));
         body.append(element("p", "form-note", "Enable terminal screen-reader output only when needed: xterm changes browser text-insertion/emoji handling in that mode. Verify your screen-reader and IME combination."));
         body.append(element("p", "form-note", "Keep-awake needs no administrator rights and does not change Windows power settings. The display may turn off. Manual sleep/hibernate, shutdown, lid and critical-battery policies can still stop work. Leave the app open for schedules; closing it disarms them. Main window size and maximized state are remembered automatically."));
+        if (state.storage) body.append(element("p", "form-note",
+          `Configuration file: ${state.storage.path}\n` +
+          (state.storage.isOneDrive
+            ? "OneDrive storage: changes from other PCs load on app startup. Wait for OneDrive to finish syncing and avoid editing from two PCs at once. Browser caches, running sessions and schedule approvals stay on this PC."
+            : "Local storage: no OneDrive folder is selected for this data directory. The default launch uses OneDrive when configured; --data-directory overrides the location.")));
       }, data => command("settings", {
         ...settings,
         theme: data.get("theme"), fontFamily: data.get("fontFamily").trim(), fontSize: Number(data.get("fontSize")),

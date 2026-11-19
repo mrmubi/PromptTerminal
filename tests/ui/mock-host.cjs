@@ -36,7 +36,8 @@ async function installMockHost(page, document) {
     const snapshot = {
       type: "state", document, resolvedTheme: document.settings.theme === "light" ? "light" : "dark",
       runtimes: [], schedules: [], keepAwakeEnabled: !!document.settings.preventSleep,
-      maximized: {}, unreadTabs: [], saveStatus: "Saved locally", autosaveEnabled: true
+      maximized: {}, unreadTabs: [], saveStatus: "Saved locally", autosaveEnabled: true,
+      storage: { path: "C:\\PromptTerminal-test\\workspace.json", isOneDrive: false }
     };
     const fixture = {
       snapshot, messages: [], responsiveFloating: false,

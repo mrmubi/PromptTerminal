@@ -29,7 +29,7 @@ and an ordinary PowerShell prompt, all visible in one workspace.
 | Recommended stack | .NET 10 LTS, WPF, MVVM, Windows ConPTY, and a mature terminal renderer. |
 | Recommended renderer | Locally bundled xterm.js in WebView2; see architecture below. |
 | Themes | Dark and Light (white), with an option to follow Windows appearance. |
-| Storage | Local, versioned JSON configuration; no cloud account required. |
+| Storage | Versioned JSON in OneDrive when configured, otherwise local; no cloud account required for local use. |
 
 "Windows" inside a tab means embedded terminal panels, not external PowerShell
 console windows. Detached operating-system windows are outside the first release.
@@ -206,10 +206,14 @@ require explicit integrations or launch wrappers, introduced separately.
 New terminal output on a running session automatically animates a non-interactive
 red/coral gradient around a 3-pixel pane border, adds a soft glow and red title-bar
 highlight, and gently fades its title. This applies to manual and scheduled runs
-without requiring shell integration. Stop the indicator after two seconds with
-no new output, or immediately when the process stops. Empty, replayed and
-old-generation output must not refresh activity. Keep activity ephemeral and
-clear its timers when a pane closes or changes generation.
+without requiring shell integration. With no explicit task state, stop the
+indicator after two seconds with no new output. Explicit working and waiting
+signals keep it animated regardless of output inactivity. An explicit completed
+signal stops animation immediately and suppresses subsequent output animation
+until another working/waiting signal or a new session. A non-running process
+always remains static. Empty, replayed and old-generation output must not refresh
+activity. Keep activity ephemeral and clear its timers when a pane closes or
+changes generation.
 
 Output activity is a visual hint only: neither output nor silence changes the
 agent's explicit working/waiting/completed signals, marks a task completed, or
@@ -219,6 +223,22 @@ temporarily masked panes.
 
 ### FR-06: Save, reopen, and recover workspaces
 
+- Default to `PromptTerminal\workspace.json` within the first configured
+  OneDrive root (`OneDrive`, `OneDriveCommercial`, then `OneDriveConsumer`).
+  Retain the local application-data default when OneDrive is not configured;
+  report an unavailable configured OneDrive root instead of silently falling back.
+- Copy an existing local workspace and backup once on first use, retain the
+  originals, and never replace an existing synced workspace during migration.
+- Keep browser caches machine-local. Explicit absolute `--data-directory`
+  overrides remain isolated and do not trigger default-data migration.
+- Load cross-PC changes on app startup, without restoring live sessions,
+  terminal history or armed schedule approvals. Do not hot-reload active sessions.
+- Detect changes already synced to the saved file before writing. Pause autosave
+  on conflict; explicit replacement must retain the changed file and require
+  confirmation. Closing with unsaved conflicting edits also requires confirmation.
+  Do not claim distributed locking, conflict-free simultaneous editing or that a
+  successful local write proves OneDrive upload completion.
+- Show the active configuration path and storage mode in Settings.
 - Save tab order, pane names, launch settings, tiled split ratios, floating
   bounds, z-order, and the selected tab.
 - Autosave layout changes using atomic file replacement and retain a last-known

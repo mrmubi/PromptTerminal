@@ -12,7 +12,7 @@ const { documentFixture } = require("./mock-host.cjs");
 const execute = promisify(execFile);
 const root = path.resolve(__dirname, "..", "..");
 const targetExecutable = process.argv.slice(2).find(argument =>
-  !["--features-only", "--recurring-defaults-only", "--floating-layout-only", "--activity-only"].includes(argument));
+  !["--features-only", "--recurring-defaults-only", "--floating-layout-only", "--activity-only", "--storage-only"].includes(argument));
 const executable = targetExecutable ? path.resolve(targetExecutable)
   : path.join(root, "src", "PromptTerminal.App", "bin", "Debug", "net10.0-windows", "PromptTerminal.App.exe");
 const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -459,6 +459,7 @@ async function runActivityIndicator(port) {
     pane.profile.workingDirectory = root;
     pane.profile.enableIntegration = false;
   }
+  idle.profile.enableIntegration = true;
   const due = new Date(Date.now() + 45000);
   scheduled.plan.recurrence = { frequency: "daily",
     time: [due.getHours(), due.getMinutes(), due.getSeconds()].map(value => String(value).padStart(2, "0")).join(":"), day: "monday" };
@@ -509,9 +510,79 @@ async function runActivityIndicator(port) {
   assert.equal(await scheduledPane.evaluate(node => node.classList.contains("is-working")), false);
   assert.equal(await processId(page, idle.id), idlePid);
   console.log("PASS: manual and scheduled output animate without integration; two-second inactivity, process exit and reduced motion are respected");
+  const signaledPane = page.locator(`.pane[data-pane-id="${idle.id}"]`);
+  for (const signal of ["working", "waiting", "completed", "working", "completed"]) {
+    await sendCommand(page, idle.id, `Send-PromptTerminalSignal -State ${signal} -Message 'ACTIVITY-${signal}'`);
+    await page.waitForFunction(({ id, signal }) =>
+      document.querySelector(`.pane[data-pane-id="${id}"] .pane-signal`).textContent === `Integration: ${signal}`,
+    { id: idle.id, signal });
+    assert.equal(await signaledPane.evaluate(node => node.classList.contains("is-working")), signal !== "completed");
+    await page.waitForTimeout(2300);
+    assert.equal(await signaledPane.evaluate(node => node.classList.contains("is-working")), signal !== "completed",
+      "Explicit working/waiting/completed states take precedence over output inactivity");
+    if (signal === "completed") {
+      await sendCommand(page, idle.id, "[Console]::WriteLine('AFTER-COMPLETED-OUTPUT')");
+      await waitOutput(page, idle.id, "AFTER-COMPLETED-OUTPUT");
+      assert.equal(await signaledPane.evaluate(node => node.classList.contains("is-working")), false);
+    }
+    assert.equal(await processId(page, idle.id), idlePid);
+  }
+  console.log("PASS: explicit working/waiting stay animated through silence; completed stops immediately and suppresses further output animation");
   await closeApplication();
   await nativeButton("Close Prompt Terminal", "Close and stop");
   await waitForExit();
+}
+
+async function runStorage(port) {
+  const fixture = documentFixture(1, 1);
+  fixture.workspace.tabs[0].panes[0].plan.recurrence =
+    { frequency: "hourly", time: "00:00:00", day: "monday" };
+  const configuration = path.join(dataDirectory, "workspace.json");
+  await fs.writeFile(configuration, JSON.stringify(fixture));
+  let page = await startApplication(port);
+  assert.ok((await page.locator("#save-status").getAttribute("title")).includes(configuration));
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), 1);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 1);
+  await fs.access(path.join(dataDirectory, "WebView2"));
+  async function changeTheme(theme) {
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByLabel("Theme", { exact: true }).selectOption(theme);
+    await page.getByRole("button", { name: "Apply settings", exact: true }).click();
+  }
+  await changeTheme("light");
+  let saved = await savedDocument(document => document.settings.theme === "light");
+  saved.workspace.tabs[0].name = "Updated on another PC";
+  await fs.writeFile(configuration, JSON.stringify(saved));
+  await page.getByRole("button", { name: "Tab options", exact: true }).click();
+  await page.getByLabel("Tab name", { exact: true }).fill("Unsaved local workspace");
+  await page.getByRole("button", { name: "Save tab", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("#save-status").textContent.includes("autosave paused"));
+  assert.equal(JSON.parse(await fs.readFile(configuration, "utf8")).workspace.tabs[0].name, "Updated on another PC");
+  await page.locator(".header-actions summary").click();
+  await page.getByRole("button", { name: "Save now", exact: true }).click();
+  await nativeButton("Replace externally changed workspace", "Retain original and save");
+  saved = await savedDocument(document => document.workspace.tabs[0].name === "Unsaved local workspace");
+  const recovered = (await fs.readdir(dataDirectory)).filter(name => /^workspace\.json\.recovered-.*\.json$/.test(name));
+  assert.equal(recovered.length, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataDirectory, recovered[0]), "utf8")).workspace.tabs[0].name,
+    "Updated on another PC");
+  saved.workspace.tabs[0].name = "Latest synced workspace";
+  await fs.writeFile(configuration, JSON.stringify(saved));
+  await changeTheme("dark");
+  await page.waitForFunction(() => document.querySelector("#save-status").textContent.includes("autosave paused"));
+  await closeApplication();
+  await nativeButton("Close without saving workspace", "Close without saving");
+  await waitForExit();
+  await browser.close();
+  browser = null;
+  assert.equal(JSON.parse(await fs.readFile(configuration, "utf8")).workspace.tabs[0].name, "Latest synced workspace");
+  page = await startApplication(await freePort());
+  await page.getByRole("tab", { name: "Latest synced workspace", exact: true }).waitFor();
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), 1);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 1);
+  await closeApplication();
+  await waitForExit();
+  console.log("PASS: explicit storage isolation, external-change protection, retained originals and startup-only reload without launching sessions or arming schedules");
 }
 
 async function runAutomationFeatures(port) {
@@ -696,6 +767,11 @@ async function runAutomationFeatures(port) {
 async function run() {
   await fs.access(executable);
   dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "PromptTerminal-smoke-"));
+  if (process.argv.includes("--storage-only")) {
+    await runStorage(await freePort());
+    assert.deepEqual(rendererErrors, []);
+    return;
+  }
   if (process.argv.includes("--activity-only")) {
     await runActivityIndicator(await freePort());
     assert.deepEqual(rendererErrors, []);

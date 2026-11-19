@@ -58,7 +58,7 @@ never silently replaced by another shell.
   terminal search, copy/paste and opt-in plain-text transcript export.
 - Dark, White/Light and Follow Windows themes; live font/scrollback settings and
   configurable shortcuts.
-- Atomic local autosave with a last-save backup, explicit recovery, safe layout
+- Atomic JSON autosave with OneDrive-backed defaults, a last-save backup, explicit recovery, safe layout
   import and script-free export by default.
 - Workspace templates, prompt snippets, command palette, Git worktree creation,
   explicit integration notifications, scheduled/dependent startup, deliberate
@@ -116,10 +116,13 @@ Output, silence and exit codes are never guessed to be task completion.
 Terminal output automatically shows a rotating 3-pixel red/coral border with a
 soft glow, highlights the title bar in red and gently fades the title. This works
 for manual and scheduled runs without shell integration or signal commands.
-The animation stops after **two seconds without new output**, or immediately
-when the process stops. Empty/replayed/stale output and state refreshes do not
-keep it active. This is only an output-activity hint: it does not change explicit
-working/waiting/completed signals, infer completion or release dependent tasks.
+Without an explicit task state, the animation stops after **two seconds without
+new output**. An explicit **working** or **waiting** signal keeps it animated,
+even through silence. **Completed** stops it immediately, and later output does
+not restart it until another working/waiting signal or a new session. Stopping
+the process always stops animation. Empty/replayed/stale output and state
+refreshes do not extend the output timeout. The visual indicator never invents
+task states, infers completion or releases dependencies based on output.
 Reduced-motion and high-contrast preferences use a steady activity border
 instead; animations pause in hidden tabs and masked panes.
 Current directory/branch information requires the explicit `directory` signal;
@@ -205,12 +208,41 @@ combination.
 
 ## Storage, recovery and privacy
 
-Configuration is stored in `%LOCALAPPDATA%\PromptTerminal\workspace.json`;
+By default, configuration is stored in the signed-in OneDrive folder at
+`PromptTerminal\workspace.json`. The app checks `OneDrive`, `OneDriveCommercial`,
+then `OneDriveConsumer` environment variables, using the first configured root.
+With no OneDrive configured, it retains the local default:
+`%LOCALAPPDATA%\PromptTerminal\workspace.json`. A configured but unavailable
+OneDrive folder produces an error rather than silently starting a second local
+workspace. **Settings** and the save-status tooltip show the exact active path.
+
+On the first default OneDrive launch, an existing local workspace and its backup
+are copied without deleting or changing the originals. An existing OneDrive
+workspace always wins, including when it requires recovery; local data never
+silently replaces it. Migration is recorded locally so deleting a synced file
+does not repeatedly import an old local workspace.
+
+Use the updated app with the **same OneDrive account on each PC**. Wait for
+OneDrive to finish syncing before opening the app on another PC. Changes are
+loaded **on app startup**, not hot-reloaded into running sessions. Avoid editing
+the workspace from multiple PCs simultaneously: this is file sync, not live
+collaboration. If an external change has already reached the local file, the
+app pauses autosave instead of overwriting it. Restart to load that version, or
+use **Save now** to explicitly retain it as a recovery file and replace it.
+OneDrive owns upload/download status; **Saved to OneDrive folder** does not
+claim that a cloud upload has completed. Offline or simultaneous edits can still
+produce OneDrive conflicted copies that need manual resolution.
+
 `workspace.json.bak` retains the previous save. Layout, profiles, snippets,
 templates and settings are persisted; process IDs, native handles, live state and
 session generations are not. Main-window restore size/maximized state and
 recurrence definitions are saved; armed approvals and next-run runtime state are
 not.
+WebView2 caches remain under local application data and are not migrated to
+OneDrive. Running processes, terminal history, external tool sign-ins and armed schedule
+approvals do not move between PCs. Commands and working-directory paths must
+exist on each PC; supported Windows environment variables such as `%USERPROFILE%`
+can make configured paths portable.
 
 Configuration is **plain text**, not a credential store. Scripts, snippets and
 environment overrides can contain secrets: do not put credentials in them.
@@ -240,7 +272,11 @@ To isolate application configuration, including for tests:
 ```
 
 One application instance per data directory is allowed in a Windows desktop
-session to prevent competing autosaves. Closing confirms the affected live/queued
+session to prevent competing autosaves on that PC, not across PCs. Default
+OneDrive launches also reserve the original local directory to prevent an older
+local-data instance running during migration. The explicit `--data-directory`
+override remains available and does not migrate the default local workspace.
+Closing confirms the affected live/queued
 session count and stops only the pane-owned process trees. Interrupt first when
 an agent needs a chance to finish gracefully.
 
@@ -275,7 +311,10 @@ Use `--floating-layout-only` for native default-floating creation, duplication,
 equal grid reflow, monitor-limited window growth, normal/maximized restore and
 live process/terminal-history preservation.
 Use `--activity-only` for real manual and scheduled output with integration
-disabled, idle-shell exclusion, reduced-motion handling and cleanup after exit.
+disabled, explicit working/waiting/completed animation overrides, idle-shell
+exclusion, reduced-motion handling and cleanup after exit.
+Use `--storage-only` for external-change protection, explicit replacement with
+retained originals, isolated data-directory overrides and startup-only reload.
 
 The browser tests use locally installed Microsoft Edge. The desktop smoke test
 requires an interactive Windows desktop and the Debug build. It checks twelve

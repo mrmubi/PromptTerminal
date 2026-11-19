@@ -84,7 +84,7 @@ test("mounts twelve independent terminal views without auto-starting shells", as
   }, documentFixture(3, 4));
 });
 
-test("live output animates automatically without changing explicit signals, terminal instances or history", async () => {
+test("live output respects explicit animation states without changing signals, terminal instances or history", async () => {
   await withPage(async (page, fixture) => {
     await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
     const id = fixture.workspace.tabs[0].panes[0].id;
@@ -107,12 +107,13 @@ test("live output animates automatically without changing explicit signals, term
         window.__host.publish();
       }, { id, signal });
       const actual = await appearance();
-      assert.equal(actual.working, true);
-      assert.equal(actual.border, "pane-border-orbit");
-      assert.equal(actual.title, "pane-title-breathe");
-      assert.equal(await pane.evaluate(node => getComputedStyle(node, "::after").boxShadow !== "none"), true);
+      const animated = signal !== "completed";
+      assert.equal(actual.working, animated);
+      assert.equal(actual.border, animated ? "pane-border-orbit" : "none");
+      assert.equal(actual.title, animated ? "pane-title-breathe" : "none");
+      assert.equal(await pane.evaluate(node => getComputedStyle(node, "::after").boxShadow !== "none"), animated);
       assert.ok(actual.opacity >= .85 && actual.opacity <= 1);
-      assert.equal(await page.locator(".pane.is-working").count(), 1);
+      assert.equal(await page.locator(".pane.is-working").count(), animated ? 1 : 0);
       assert.equal(await pane.locator(".pane-signal").textContent(), signal ? `Integration: ${signal}` : "");
     }
     for (const state of ["queued", "starting", "stopping", "exited", "failed", "notStarted"]) {
@@ -133,6 +134,56 @@ test("live output animates automatically without changing explicit signals, term
   });
 });
 
+test("explicit working and waiting keep animating through silence while completed overrides later output", async () => {
+  await withPage(async (page, fixture) => {
+    const id = fixture.workspace.tabs[0].panes[0].id;
+    const pane = page.locator(`.pane[data-pane-id="${id}"]`);
+    await page.emulateMedia({ reducedMotion: "no-preference", forcedColors: "none" });
+    await page.clock.install();
+    await page.clock.pauseAt(new Date(Date.now() + 60000));
+    await page.evaluate(() => window.__host.running());
+    const report = signal => page.evaluate(({ id, signal }) => {
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).signal = signal;
+      window.__host.publish();
+    }, { id, signal });
+    const animated = () => pane.evaluate(node => node.classList.contains("is-working"));
+    for (const signal of ["working", "waiting"]) {
+      await report(signal);
+      assert.equal(await animated(), true, "Explicit activity does not require terminal output");
+      await page.clock.runFor(10000);
+      assert.equal(await animated(), true, `${signal} must outlast the output inactivity timeout`);
+      assert.equal(await pane.evaluate(node => getComputedStyle(node, "::before").animationName), "pane-border-orbit");
+      assert.equal(await pane.locator(".pane-name").evaluate(node => getComputedStyle(node).animationName), "pane-title-breathe");
+      assert.equal(await pane.locator(".pane-signal").textContent(), `Integration: ${signal}`);
+      assert.equal(await page.locator(".pane.is-working").count(), 1);
+    }
+    await report("completed");
+    assert.equal(await animated(), false, "Completion stops animation immediately");
+    await page.evaluate(id => {
+      window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 1, text: "Output after completion\r\n" });
+    }, id);
+    await page.clock.runFor(100);
+    assert.equal(await animated(), false, "Post-completion output must not restart animation");
+    assert.equal(await pane.locator(".pane-signal").textContent(), "Integration: completed");
+    await report("waiting");
+    assert.equal(await animated(), true, "A new activity signal can resume animation");
+    await page.evaluate(id => {
+      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).state = "exited";
+      window.__host.publish();
+    }, id);
+    assert.equal(await animated(), false, "An exited process cannot remain animated");
+    await page.evaluate(id => {
+      Object.assign(window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id),
+        { generation: 2, state: "running", signal: null });
+      window.__host.publish();
+      window.__host.emit({ type: "output", paneId: id, generation: 2, sequence: 1, text: "New session output\r\n" });
+    }, id);
+    assert.equal(await animated(), true, "A new session retains automatic output detection");
+    await page.clock.runFor(2000);
+    assert.equal(await animated(), false);
+  });
+});
+
 test("output activity expires at two quiet seconds and ignores state refreshes, replays and empty output", async () => {
   await withPage(async (page, fixture) => {
     const id = fixture.workspace.tabs[0].panes[0].id;
@@ -147,15 +198,14 @@ test("output activity expires at two quiet seconds and ignores state refreshes, 
     await page.clock.runFor(1000);
     await page.evaluate(id => {
       window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 2, text: "More output\r\n" });
-      window.__host.snapshot.runtimes.find(runtime => runtime.paneId === id).signal = "working";
       window.__host.publish();
     }, id);
     await page.clock.runFor(1999);
     assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), true);
     await page.clock.runFor(1);
     assert.equal(await pane.evaluate(node => node.classList.contains("is-working")), false);
-    assert.equal(await pane.locator(".pane-signal").textContent(), "Integration: working",
-      "Visual inactivity does not change the integration's reported state");
+    assert.equal(await pane.locator(".pane-signal").textContent(), "",
+      "Visual inactivity does not invent an integration state");
     await page.evaluate(id => {
       window.__host.emit({ type: "output", paneId: id, generation: 0, sequence: 3, text: "STALE" });
       window.__host.emit({ type: "output", paneId: id, generation: 1, sequence: 2, text: "REPLAY" });
@@ -434,6 +484,25 @@ test("keep-awake is opt-in, can be disabled, and preserves live terminal instanc
     }
     assert.equal(await page.evaluate(id =>
       window.__powerTerminal === document.querySelector(`[data-pane-id="${id}"] .xterm`), id), true);
+  });
+});
+
+test("settings and save status identify OneDrive startup-only storage without claiming upload completion", async () => {
+  await withPage(async page => {
+    for (const isOneDrive of [true, false]) {
+      const location = isOneDrive ? "C:\\OneDrive\\PromptTerminal\\workspace.json" : "C:\\Local\\PromptTerminal\\workspace.json";
+      await page.evaluate(({ path, isOneDrive }) => window.__host.publish({ storage: { path, isOneDrive } }),
+        { path: location, isOneDrive });
+      assert.match(await page.locator("#save-status").getAttribute("title"),
+        isOneDrive ? /OneDrive folder; changes load on app startup/ : /Local storage/);
+      assert.ok((await page.locator("#save-status").getAttribute("title")).includes(location));
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      const note = await page.locator("#dialog-body .form-note").allTextContents().then(notes =>
+        notes.find(note => note.startsWith("Configuration file:")));
+      assert.ok(note.includes(location));
+      assert.match(note, isOneDrive ? /OneDrive storage: changes from other PCs load on app startup/ : /Local storage/);
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    }
   });
 });
 

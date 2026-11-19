@@ -20,7 +20,7 @@ namespace PromptTerminal.App;
 public partial class MainWindow : Window
 {
     private const string RendererUrl = "https://promptterminal.local/index.html";
-    private readonly WorkspaceStore _store = new(Path.Combine(App.DataDirectory, "workspace.json"));
+    private readonly WorkspaceStore _store = new(App.Storage.WorkspacePath);
     private readonly SemaphoreSlim _commands = new(1, 1);
     private readonly Dictionary<Guid, PaneRuntime> _runtimes = [];
     private readonly Dictionary<Guid, ScheduledLaunch> _schedules = [];
@@ -36,6 +36,7 @@ public partial class MainWindow : Window
     private bool _ready, _initializing, _checkingQueue, _shuttingDown, _allowClose;
     private bool _recreateBrowser;
     private bool _windowPreferencesLoaded;
+    private bool _storageConflict;
     private CoreWebView2? _activeCore;
     private bool _persistenceEnabled = true, _dark = true;
     private int _ticks;
@@ -98,7 +99,7 @@ public partial class MainWindow : Window
             var assets = Path.Combine(AppContext.BaseDirectory, "Web");
             if (!File.Exists(Path.Combine(assets, "index.html")) || !File.Exists(Path.Combine(assets, "vendor", "xterm.js")))
                 throw new FileNotFoundException("Local renderer assets are missing. Run npm ci, then rebuild the application.");
-            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(App.DataDirectory, "WebView2"));
+            var environment = await CoreWebView2Environment.CreateAsync(null, App.Storage.BrowserDirectory);
             await Browser.EnsureCoreWebView2Async(environment);
             var core = Browser.CoreWebView2;
             _activeCore = core;
@@ -795,10 +796,16 @@ public partial class MainWindow : Window
         {
             await Task.Delay(400, token);
             await _store.SaveAsync(snapshot, token);
-            _saveStatus = "Saved locally";
+            _saveStatus = SavedStatus;
             await PostAsync(new { type = "saveStatus", text = _saveStatus });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (WorkspaceChangedException error)
+        {
+            PauseConflictingSaves();
+            await PostAsync(new { type = "saveStatus", text = _saveStatus });
+            await ReportErrorAsync(error.Message);
+        }
         catch (Exception error)
         {
             _saveStatus = "Save failed - use Save to retry";
@@ -809,19 +816,37 @@ public partial class MainWindow : Window
 
     private async Task<bool> SaveExplicitlyAsync()
     {
-        if (!_persistenceEnabled)
-        {
-            if (!Confirm("Replace invalid configuration", "Retain the original configuration as a separate recovery file, " +
-                    "then save the current workspace in its place?\n\n" + _store.Path, "Retain original and save")) return false;
-            PreserveOriginal();
-            _persistenceEnabled = true;
-        }
         _saveDelay?.Cancel();
         await _saveTask;
-        await _store.SaveAsync(_document);
-        _saveStatus = "Saved locally";
+        if (!_persistenceEnabled)
+        {
+            var title = _storageConflict ? "Replace externally changed workspace" : "Replace invalid configuration";
+            if (!Confirm(title, "Retain the saved configuration as a separate recovery file, " +
+                    "then save this app's current workspace in its place?\n\n" + _store.Path +
+                    "\n\nTo load changes from another PC instead, cancel and restart the app.", "Retain original and save")) return false;
+            PreserveOriginal();
+            _persistenceEnabled = true;
+            _storageConflict = false;
+        }
+        try { await _store.SaveAsync(_document); }
+        catch (WorkspaceChangedException)
+        {
+            PauseConflictingSaves();
+            await PublishStateAsync();
+            throw;
+        }
+        _saveStatus = SavedStatus;
         await PublishStateAsync();
         return true;
+    }
+
+    private string SavedStatus => App.Storage.IsOneDrive ? "Saved to OneDrive folder" : "Saved locally";
+
+    private void PauseConflictingSaves()
+    {
+        _storageConflict = true;
+        _persistenceEnabled = false;
+        _saveStatus = "Workspace changed - autosave paused";
     }
 
     private async Task<bool> RestoreBackupAsync()
@@ -838,6 +863,7 @@ public partial class MainWindow : Window
         await _store.SaveAsync(restored);
         _document = restored;
         _persistenceEnabled = true;
+        _storageConflict = false;
         _saveStatus = "Backup restored - sessions not started";
         _runtimes.Clear();
         _maximized.Clear();
@@ -849,11 +875,7 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private void PreserveOriginal()
-    {
-        if (File.Exists(_store.Path))
-            File.Move(_store.Path, _store.Path + ".recovered-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N") + ".json");
-    }
+    private void PreserveOriginal() => _store.PreserveOriginal();
 
     private async Task<bool> ImportAsync()
     {
@@ -950,6 +972,7 @@ public partial class MainWindow : Window
         }).ToArray(),
         maximized = _maximized, unreadTabs = _unread.ToArray(), saveStatus = _saveStatus,
         autosaveEnabled = _persistenceEnabled, keepAwakeEnabled = _keepAwake.IsEnabled,
+        storage = new { path = _store.Path, isOneDrive = App.Storage.IsOneDrive },
         schedules = _schedules.Select(pair => new
         {
             paneId = pair.Key, nextRun = pair.Value.NextRun, lastRun = pair.Value.LastRun,
@@ -1109,6 +1132,11 @@ public partial class MainWindow : Window
         if (_allowClose) return;
         e.Cancel = true;
         if (_shuttingDown) return;
+        var discardConfirmed = _storageConflict;
+        if (_storageConflict && !Confirm("Close without saving workspace",
+                "The saved workspace was changed outside this app. Close without saving this PC's unsaved edits?\n\n" +
+                "The latest saved file will be left unchanged and loaded on the next startup. " +
+                "Use Save now instead to retain that file and explicitly replace it.", "Close without saving")) return;
         if ((BusyCount > 0 || _schedules.Count > 0) && !Confirm("Close Prompt Terminal",
                 $"Closing stops {BusyCount} live or queued session(s) and their owned process trees.\n\n" +
                 $"It also disarms {_schedules.Count} recurring schedule(s). Use Interrupt first if an agent needs a chance to finish. Cancel leaves all sessions running.", "Close and stop")) return;
@@ -1120,6 +1148,8 @@ public partial class MainWindow : Window
             await StopAllAsync();
             _saveDelay?.Cancel();
             await _saveTask;
+            if (_storageConflict && !discardConfirmed)
+                throw new WorkspaceChangedException("The saved workspace changed while the app was closing. It was not overwritten.");
             if (_persistenceEnabled) await _store.SaveAsync(_document);
             _keepAwake.Dispose();
             SystemEvents.UserPreferenceChanged -= OnSystemAppearanceChanged;
@@ -1127,7 +1157,19 @@ public partial class MainWindow : Window
             _activeCore = null;
             Browser.Dispose();
             _allowClose = true;
+            // A paused autosave may not have yielded out of the canceled Closing event.
+            await Task.Yield();
             Close();
+        }
+        catch (WorkspaceChangedException error)
+        {
+            PauseConflictingSaves();
+            _shuttingDown = false;
+            _timer.Start();
+            await PublishStateAsync();
+            MessageBox.Show(this, error.Message + "\n\nThe app remains open with autosave paused. " +
+                "Use Save now to retain and replace the saved file, or close again to discard this PC's unsaved edits.",
+                "Workspace changed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception error)
         {
