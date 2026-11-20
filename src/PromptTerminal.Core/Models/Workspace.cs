@@ -14,6 +14,7 @@ public sealed class AppSettings
     public int Scrollback { get; set; } = 10_000;
     public bool ScreenReaderMode { get; set; }
     public bool PreventSleep { get; set; }
+    public bool AutoStartAndArmOnStartup { get; set; } = true;
     public Dictionary<string, string> Shortcuts { get; set; } = new()
     {
         ["newTab"] = "Ctrl+Shift+T",

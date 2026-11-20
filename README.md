@@ -36,7 +36,23 @@ for compatibility.
 Create a tab or pane, edit its shell, working directory and startup command, then
 choose **Review and start** or **Start workspace**. The native preview shows the
 resolved executable, scripts, environment overrides and launch conditions.
-Restoring or importing a workspace **never starts its sessions automatically**.
+**Automatic startup is enabled by default**, including for existing saved
+configurations that do not yet contain the setting. On a normal app launch,
+every saved tab's panes start without a review dialog. Recurring panes run once
+immediately and arm their future occurrences; earliest times and explicit
+dependencies still apply. Disable **Settings > Automatically start all panes
+and arm schedules on app startup** for manual-only startup.
+
+Automatic startup executes saved scripts and PowerShell profiles with your
+permissions, including OneDrive-synced changes on each PC. Trust the saved
+configuration before opening the app. It creates fresh processes, not resumed
+agent conversations, and does not add Windows-login startup. Changing the setting
+affects the next full app launch, not current processes, new unstarted panes or
+renderer reloads. A first-ever unsaved workspace, import and backup recovery stay
+unstarted in their current app session; the next normal launch follows the
+saved setting. Invalid panes show individual errors without blocking valid panes.
+To disable startup without opening the app, set `autoStartAndArmOnStartup` to
+`false` in the saved settings while the app is closed.
 The new-pane dialog also offers **Add and start pane**: its native review creates
 and starts only that pane after approval. Canceling the review or failing launch
 validation leaves the dialog open without adding a pane. **Add unstarted pane**
@@ -156,9 +172,11 @@ To schedule an agent:
    does not use a chosen time/day. Other frequencies use a local time and, for
    weekly tasks, a day. The optional earliest launch time remains a lower bound.
 3. Open **Schedules** or pane actions and **Review and arm** the native launch
-   preview. Merely saving a recurrence does not execute or arm it.
+   preview to arm it in the current app session. Merely saving a recurrence does
+   not execute or arm it immediately. With automatic startup enabled, the next
+   normal app launch runs it once and arms future occurrences without a dialog.
 
-Each occurrence starts a fresh shell with the reviewed script, environment and
+Each occurrence starts a fresh shell with its armed script/environment snapshot and
 working directory. **Any pane configured with a recurrence closes its shell
 when the command finishes**, including manual Start, Restart, Resume, Start
 workspace and Add and start. Its **Keep shell open** checkbox is automatically
@@ -173,9 +191,12 @@ is skipped visibly. Dependencies still require their expected explicit completio
 Run noninteractive agent commands for unattended work; authentication, approval
 or input prompts can keep a task alive and cause later occurrences to skip.
 
-Schedules run only while this app and its renderer are available. They are
-runtime-only approvals: reopening, importing or recovering configuration never
-re-arms them. Disarm/review again to apply edits to an approved snapshot.
+Schedules run only while this app and its renderer are available. Armed snapshots
+are runtime-only: a normal restart prepares fresh snapshots and re-arms them when
+automatic startup is enabled. With it disabled, review and arm manually per app
+session. Import, backup recovery and renderer reload do not re-arm schedules in
+the current app session. Disarm/review again to apply edits to an armed snapshot,
+or let automatic startup use the saved changes on the next full app launch.
 Disarming leaves an already running occurrence alone; **Stop** also disarms
 future runs. An occurrence missed by more than one minute is skipped, without
 catch-up bursts. Local daylight-saving gaps are skipped; repeated wall-clock
@@ -315,6 +336,11 @@ disabled, explicit working/waiting/completed animation overrides, idle-shell
 exclusion, reduced-motion handling and cleanup after exit.
 Use `--storage-only` for external-change protection, explicit replacement with
 retained originals, isolated data-directory overrides and startup-only reload.
+Use `--startup-only` for default-on all-tab startup, immediate recurring runs and
+automatic arming, invalid-pane isolation, dependency/earliest-time handling,
+disabled-mode persistence, renderer-reload deduplication and recovery safety.
+Other desktop fixtures explicitly disable automatic startup to exercise manual
+review and unstarted restore behavior.
 
 The browser tests use locally installed Microsoft Edge. The desktop smoke test
 requires an interactive Windows desktop and the Debug build. It checks twelve

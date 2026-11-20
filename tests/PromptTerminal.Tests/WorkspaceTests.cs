@@ -79,6 +79,7 @@ public sealed class WorkspaceTests : IDisposable
         document.Settings.Theme = theme;
         document.Settings.ScreenReaderMode = true;
         document.Settings.PreventSleep = true;
+        document.Settings.AutoStartAndArmOnStartup = false;
         document.MainWindow = new() { Width = 1200, Height = 760, Maximized = true };
         document.Workspace.Tabs[0].Panes[0].Plan.Recurrence = new()
         {
@@ -91,6 +92,7 @@ public sealed class WorkspaceTests : IDisposable
         Assert.Equal(theme, restored.Settings.Theme);
         Assert.True(restored.Settings.ScreenReaderMode);
         Assert.True(restored.Settings.PreventSleep);
+        Assert.False(restored.Settings.AutoStartAndArmOnStartup);
         Assert.Equal(1200, restored.MainWindow.Width);
         Assert.Equal(760, restored.MainWindow.Height);
         Assert.True(restored.MainWindow.Maximized);
@@ -159,18 +161,32 @@ public sealed class WorkspaceTests : IDisposable
     }
 
     [Fact]
-    public void OlderDocumentsGetSafePowerWindowAndRecurrenceDefaults()
+    public void OlderDocumentsGetCurrentStartupPowerWindowAndRecurrenceDefaults()
     {
         var json = JsonSerializer.SerializeToNode(WorkspaceDefaults.Create(), WorkspaceJson.Options)!;
         json.AsObject().Remove("mainWindow");
         json["settings"]!.AsObject().Remove("preventSleep");
+        json["settings"]!.AsObject().Remove("autoStartAndArmOnStartup");
         foreach (var pane in json["workspace"]!["tabs"]![0]!["panes"]!.AsArray())
             pane!["plan"]!.AsObject().Remove("recurrence");
         var restored = json.Deserialize<ApplicationDocument>(WorkspaceJson.Options)!;
         WorkspaceValidator.Validate(restored);
         Assert.False(restored.Settings.PreventSleep);
+        Assert.True(restored.Settings.AutoStartAndArmOnStartup);
         Assert.Equal(1450, restored.MainWindow.Width);
         Assert.Null(restored.Workspace.Tabs[0].Panes[0].Plan.Recurrence);
+    }
+
+    [Fact]
+    public void AutomaticStartupIsEnabledForNewSettingsAndCanBePersistedExplicitly()
+    {
+        Assert.True(new AppSettings().AutoStartAndArmOnStartup);
+        var document = WorkspaceDefaults.Create();
+        Assert.True(document.Settings.AutoStartAndArmOnStartup);
+        var restored = WorkspaceJson.Clone(document);
+        Assert.True(restored.Settings.AutoStartAndArmOnStartup);
+        document.Settings.AutoStartAndArmOnStartup = false;
+        Assert.False(WorkspaceJson.Clone(document).Settings.AutoStartAndArmOnStartup);
     }
 
     [Fact]

@@ -21,7 +21,8 @@ function documentFixture(tabCount = 2, panesPerTab = 2) {
   return {
     schemaVersion: 1, workspace: { schemaVersion: 1, tabs, activeTabId: tabs[0].id },
     mainWindow: { width: 1450, height: 900, maximized: false },
-    settings: { theme: "dark", fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 10000, screenReaderMode: false, preventSleep: false, shortcuts: {
+    settings: { theme: "dark", fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 10000, screenReaderMode: false,
+      preventSleep: false, autoStartAndArmOnStartup: false, shortcuts: {
       newTab: "Ctrl+Shift+T", newPane: "Ctrl+Shift+N", splitHorizontal: "Ctrl+Shift+H", splitVertical: "Ctrl+Shift+J",
       nextTab: "Ctrl+Tab", previousTab: "Ctrl+Shift+Tab", nextPane: "Alt+ArrowRight", previousPane: "Alt+ArrowLeft",
       maximize: "Ctrl+Shift+M", toggleFloat: "Ctrl+Shift+F", palette: "Ctrl+Shift+P", search: "Ctrl+Shift+S"

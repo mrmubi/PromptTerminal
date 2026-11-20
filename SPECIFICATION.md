@@ -243,14 +243,30 @@ temporarily masked panes.
   bounds, z-order, and the selected tab.
 - Autosave layout changes using atomic file replacement and retain a last-known
   valid configuration.
-- Reopen saved configurations without automatically executing their scripts.
+- Provide a persisted **Automatically start all panes and arm schedules on app
+  startup** setting, enabled by default even when absent from older documents.
+  A normal startup of a valid saved workspace launches panes across all tabs
+  without a review dialog and arms their recurring tasks. Recurring panes run
+  once immediately as well as at future occurrences; existing earliest times and
+  explicit completion dependencies still apply.
+- Prepare immutable launch/schedule snapshots with normal executable/directory
+  validation. Invalid panes fail visibly without blocking valid siblings.
+- Apply startup automation once per app process after the renderer is ready;
+  changing the setting, adding unstarted panes, importing, recovering a backup
+  or reloading the renderer must not trigger another automatic launch/arming
+  pass in the current session. A new unsaved workspace remains unstarted.
+- Disabling automatic startup restores manual-only startup. Clearly warn that
+  enabling it executes saved scripts and PowerShell profiles, including
+  OneDrive-synced changes, with the user's permissions on each PC. This is not
+  Windows-login startup and does not resume a previous live agent.
 - Provide an explicit Start Workspace action with a preview of commands and
   working directories.
 - If only some panes fail to launch, keep successful sessions running and show
   errors on the affected panes.
 - Warn before closing the application while sessions are running.
-- On reopening after a crash, restore the saved layout and clearly label its
-  sessions as not started.
+- On reopening after a crash, restore the saved layout and follow the startup
+  setting. Show actual queued/running/failed states without claiming a previous
+  process or conversation was resumed.
 - Remember main-window normal size and maximized state in logical pixels,
   constrained to the current work area; minimizing must not overwrite them.
 
@@ -323,7 +339,7 @@ restart agents or claim that the terminal was restored without restoring its sta
 | P1 | Git branch and directory indicators | Report live values only when shell integration is available; otherwise label the initial directory. |
 | P2 | Broadcast input | Explicitly select recipients, show a persistent warning, and require a deliberate send action. |
 | P2 | Agent-specific integrations | Show waiting-for-approval, task completion, and resume options when supported. |
-| P2 | Scheduled and dependent startup | Reviewed hourly/daily/weekday/weekly local-time recurrence and explicit prerequisite signals; skip busy/missed runs; never auto-arm restored schedules. |
+| P2 | Scheduled and dependent startup | Hourly/daily/weekday/weekly local-time recurrence, default-on automatic startup/arming, optional manual-only startup and explicit prerequisite signals; skip busy/missed runs. |
 | P2 | App-only keep-awake | Opt-in idle sleep/hibernate prevention while open; release on exit without modifying Windows power configuration. |
 | P2 | CPU and memory indicators | Identify expensive sessions, with clear limits on process-tree attribution. |
 | P2 | Read-only monitoring mode | Prevent accidental typing into selected sessions. |
@@ -415,8 +431,9 @@ Reconcile saved bounds with the current viewport during restore.
 Do not persist process IDs, native handles, live-state flags, or runtime
 credentials as launchable state.
 
-Recurring approvals, reviewed snapshots and next-run/status information are
-runtime-only. Users explicitly review and arm each schedule per app session.
+Recurring approvals, armed snapshots and next-run/status information are
+runtime-only. Automatic startup prepares new snapshots and arms schedules for
+each normal app launch when enabled; otherwise users review and arm manually.
 Each run uses its approved snapshot in a fresh shell that closes after its
 startup script. All new launches of a pane configured with recurrence also
 close when their command finishes, including manual Start, Restart, Resume,
@@ -457,7 +474,9 @@ directory and agent command are illustrative, not application dependencies.
 - All sessions run with the current user's permissions. Pane separation is not
   a security sandbox.
 - No elevation or automatic credential provisioning in the MVP.
-- Never auto-execute startup scripts from imported or recovered configuration.
+- Import and backup recovery leave commands unstarted in the current session.
+  Warn when automatic startup is enabled: the next normal app launch will run
+  those saved commands without a review dialog.
 - Show commands and environment overrides before starting an imported workspace.
 - Avoid storing secrets in workspace files. Command text itself may contain
   secrets; warn before saving or exporting it and allow its omission.
@@ -497,7 +516,7 @@ and remaining manual checks are summarized in [README.md](README.md).
 | AC-07 | Exit one shell and fail another pane's launch. | Other panes continue; exited output is retained and launch errors are visible. |
 | AC-08 | Close a live pane, tab, or application. | Confirmation identifies the affected sessions; cancellation leaves them running. |
 | AC-09 | Force-stop a session that spawned child processes. | Only that session's owned process tree stops; sibling and unrelated processes survive. |
-| AC-10 | Save and reopen a mixed tiled/floating layout. | Tab order, placement, names, and commands restore, but no commands run until explicitly started. |
+| AC-10 | Save and reopen a mixed tiled/floating layout. | Tab order, placement, names, and commands restore. With default-on startup automation, valid panes start and recurring tasks arm; with it disabled, sessions remain unstarted/unarmed. Renderer reload never duplicates startup. |
 | AC-11 | Restore after a crash or open a corrupt configuration. | Valid saved state is recoverable; corruption is reported without silently overwriting the original. |
 | AC-12 | Open a workspace containing startup code or output containing HTML and escape sequences. | Import does not run code; output cannot invoke privileged bridge operations or silently write the clipboard. |
 | AC-13 | Move between 100%, 150%, and 200% DPI displays and reduce window size. | Text and terminal dimensions update; every floating panel remains reachable. |

@@ -12,7 +12,7 @@ const { documentFixture } = require("./mock-host.cjs");
 const execute = promisify(execFile);
 const root = path.resolve(__dirname, "..", "..");
 const targetExecutable = process.argv.slice(2).find(argument =>
-  !["--features-only", "--recurring-defaults-only", "--floating-layout-only", "--activity-only", "--storage-only"].includes(argument));
+  !["--features-only", "--recurring-defaults-only", "--floating-layout-only", "--activity-only", "--storage-only", "--startup-only"].includes(argument));
 const executable = targetExecutable ? path.resolve(targetExecutable)
   : path.join(root, "src", "PromptTerminal.App", "bin", "Debug", "net10.0-windows", "PromptTerminal.App.exe");
 const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -533,6 +533,144 @@ async function runActivityIndicator(port) {
   await waitForExit();
 }
 
+async function runAutomaticStartup(port) {
+  const fixture = documentFixture(2, 3);
+  const [parent, recurring, invalid] = fixture.workspace.tabs[0].panes;
+  const [dependent, blank, later] = fixture.workspace.tabs[1].panes;
+  const allPanes = fixture.workspace.tabs.flatMap(tab => tab.panes);
+  const configuration = path.join(dataDirectory, "workspace.json");
+  const marker = pane => path.join(dataDirectory, `startup-${pane.id}.txt`);
+  const script = pane => `Add-Content -LiteralPath ${quote(marker(pane))} -Value 'run'; [Console]::WriteLine('AUTO-${pane.id}')`;
+  for (const pane of allPanes) {
+    pane.profile.workingDirectory = root;
+    pane.profile.startupScript = script(pane);
+  }
+  fixture.profiles[0].workingDirectory = root;
+  parent.profile.startupScript += "; Start-Sleep -Seconds 2; Send-PromptTerminalSignal -State completed -Message 'Startup prerequisite done'";
+  dependent.plan.afterPaneId = parent.id;
+  const daily = new Date(Date.now() + 6 * 60 * 60 * 1000);
+  recurring.plan.recurrence = { frequency: "daily",
+    time: [daily.getHours(), daily.getMinutes(), daily.getSeconds()].map(value => String(value).padStart(2, "0")).join(":"), day: "monday" };
+  invalid.profile.executable = path.join(dataDirectory, "missing", "pwsh.exe");
+  blank.profile.startupScript = "";
+  blank.plan.recurrence = { frequency: "hourly", time: "00:00:00", day: "monday" };
+  later.plan.notBefore = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  delete fixture.settings.autoStartAndArmOnStartup;
+  await fs.writeFile(configuration, JSON.stringify(fixture));
+  let page = await startApplication(port);
+  async function started() {
+    await page.waitForFunction(({ parent, recurring, invalid, dependent, blank, later }) => {
+      const state = id => document.querySelector(`.pane[data-pane-id="${id}"]`)?.dataset.state;
+      return state(parent) === "running" && state(recurring) === "exited" && state(invalid) === "failed" &&
+        state(dependent) === "running" && state(blank) === "failed" && state(later) === "queued";
+    }, { parent: parent.id, recurring: recurring.id, invalid: invalid.id, dependent: dependent.id, blank: blank.id, later: later.id },
+    { timeout: 45000 });
+    for (const pane of allPanes)
+      assert.equal(await page.locator(`.pane[data-pane-id="${pane.id}"]`).getAttribute("data-generation"), "1");
+    assert.match(await page.locator(`.pane[data-pane-id="${recurring.id}"] .pane-schedule`).textContent(), /^Next:/);
+    assert.match(await page.locator(`.pane[data-pane-id="${blank.id}"] .failed-text`).textContent(), /requires a startup command/);
+    assert.match(await page.locator(`.pane[data-pane-id="${invalid.id}"] .failed-text`).textContent(), /not found/);
+    assert.equal((await page.locator(".pane-schedule").allTextContents()).filter(text => text.startsWith("Next:")).length, 1);
+  }
+  async function markerCounts(expected) {
+    for (const pane of [parent, recurring, dependent]) {
+      let count = 0;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try {
+          const text = (await fs.readFile(marker(pane), "utf8")).trim();
+          count = text ? text.split(/\r?\n/).length : 0;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        if (count >= expected) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      assert.equal(count, expected, `The startup command ran exactly ${expected} time(s) for ${pane.name}`);
+    }
+    for (const pane of [invalid, blank, later])
+      await assert.rejects(fs.access(marker(pane)), { code: "ENOENT" });
+  }
+  async function setAutomatic(enabled) {
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByLabel("Automatically start all panes and arm schedules on app startup", { exact: true }).setChecked(enabled);
+    await page.getByRole("button", { name: "Apply settings", exact: true }).click();
+    await savedDocument(document => document.settings.autoStartAndArmOnStartup === enabled);
+  }
+  async function closeLiveApp() {
+    await closeApplication();
+    await nativeButton("Close Prompt Terminal", "Close and stop");
+    await waitForExit();
+    await browser.close();
+    browser = null;
+  }
+  await started();
+  await markerCounts(1);
+  const parentPid = await processId(page, parent.id), dependentPid = await processId(page, dependent.id);
+  console.log("PASS: missing startup setting defaults on; every saved tab starts without review, recurring panes run now and arm future runs, invalid panes fail independently, dependencies and earliest times remain enforced");
+  await paneAction(page, recurring.id, "Disarm recurring task");
+  await page.evaluate(id => window.chrome.webview.postMessage({
+    version: 1, id, type: "rendererError", paneId: null, generation: null, data: { text: "Startup duplication regression" }
+  }), randomUUID());
+  await nativeButton("Prompt Terminal", "Reload terminal views");
+  await nativeButton("Recreate terminal views", "Reload views");
+  await page.waitForFunction(({ parent, dependent }) =>
+    document.querySelector(`.pane[data-pane-id="${parent}"]`)?.dataset.state === "running" &&
+    document.querySelector(`.pane[data-pane-id="${dependent}"]`)?.dataset.state === "running",
+  { parent: parent.id, dependent: dependent.id });
+  assert.equal(await processId(page, parent.id), parentPid);
+  assert.equal(await processId(page, dependent.id), dependentPid);
+  assert.equal(await page.locator(`.pane[data-pane-id="${recurring.id}"] .pane-schedule`).textContent(), "Schedule not armed");
+  await markerCounts(1);
+  await setAutomatic(false);
+  assert.equal(await processId(page, parent.id), parentPid);
+  await closeLiveApp();
+
+  page = await startApplication(await freePort());
+  await page.waitForTimeout(1200);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), allPanes.length);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 2);
+  await markerCounts(1);
+  await setAutomatic(true);
+  await page.waitForTimeout(1200);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), allPanes.length,
+    "Enabling startup automation does not launch sessions immediately");
+  await closeApplication();
+  await waitForExit();
+  await browser.close();
+  browser = null;
+
+  page = await startApplication(await freePort());
+  await started();
+  await markerCounts(2);
+  assert.notEqual(await processId(page, parent.id), parentPid);
+  console.log("PASS: renderer reload cannot duplicate runs or re-arm disarmed schedules; disabling persists and enabling applies only on the next full launch");
+  await closeLiveApp();
+  await fs.writeFile(configuration + ".bak", await fs.readFile(configuration));
+  await fs.writeFile(configuration, "{invalid configuration");
+  const recovering = startApplication(await freePort());
+  await nativeButton("Recover saved workspace", "Recover backup");
+  await nativeButton("Restore backup", "Restore backup");
+  page = await recovering;
+  await page.waitForTimeout(1200);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), allPanes.length);
+  assert.equal(await page.getByText("Schedule not armed", { exact: true }).count(), 2);
+  await markerCounts(2);
+  await closeApplication();
+  await waitForExit();
+  console.log("PASS: backup recovery remains unstarted and unarmed in its current app session, even with automatic startup enabled");
+  await browser.close();
+  browser = null;
+  await fs.rename(configuration, configuration + ".before-first-run");
+  page = await startApplication(await freePort());
+  await page.waitForTimeout(1200);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), 1);
+  assert.equal(await page.locator(".pane[data-state='running']").count(), 0);
+  await markerCounts(2);
+  await closeApplication();
+  await waitForExit();
+  console.log("PASS: a new unsaved workspace does not execute its default profile during first setup");
+}
+
 async function runStorage(port) {
   const fixture = documentFixture(1, 1);
   fixture.workspace.tabs[0].panes[0].plan.recurrence =
@@ -759,7 +897,7 @@ async function runAutomationFeatures(port) {
   const restored = await windowGeometry("restore");
   assert.ok(Math.abs(restored.width - normal.width) < 4, "Normal window width is restored after maximization");
   assert.ok(Math.abs(restored.height - normal.height) < 4, "Normal window height is restored after maximization");
-  console.log("PASS: inherited floating placement, power preference and normal/maximized window size persist; schedules never auto-arm on reopen");
+  console.log("PASS: inherited floating placement, power preference and normal/maximized window size persist; disabled startup automation leaves schedules unarmed on reopen");
   await closeApplication();
   await waitForExit();
 }
@@ -767,6 +905,11 @@ async function runAutomationFeatures(port) {
 async function run() {
   await fs.access(executable);
   dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "PromptTerminal-smoke-"));
+  if (process.argv.includes("--startup-only")) {
+    await runAutomaticStartup(await freePort());
+    assert.deepEqual(rendererErrors, []);
+    return;
+  }
   if (process.argv.includes("--storage-only")) {
     await runStorage(await freePort());
     assert.deepEqual(rendererErrors, []);
@@ -802,7 +945,7 @@ async function run() {
   await assertBranding(page);
   const first = fixture.workspace.tabs[0].panes[0].id;
   const sibling = fixture.workspace.tabs[0].panes[1].id;
-  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), initialPaneCount, "Restoring never launches scripts");
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), initialPaneCount, "Disabled startup automation leaves restored sessions unstarted");
   await page.evaluate(() => {
     window.__smokeActions = [];
     document.addEventListener("click", event => window.__smokeActions.push(event.target.closest("[data-action]")?.dataset.action || event.target.tagName), true);

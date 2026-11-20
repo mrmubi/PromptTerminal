@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private bool _recreateBrowser;
     private bool _windowPreferencesLoaded;
     private bool _storageConflict;
+    private bool _savedWorkspaceLoaded, _startupAutomationHandled;
     private CoreWebView2? _activeCore;
     private bool _persistenceEnabled = true, _dark = true;
     private int _ticks;
@@ -72,8 +73,11 @@ public partial class MainWindow : Window
     {
         try
         {
-            _document = await _store.LoadAsync() ?? WorkspaceDefaults.Create();
-            _saveStatus = File.Exists(_store.Path) ? "Restored - sessions not started" : "New workspace";
+            var saved = await _store.LoadAsync();
+            _savedWorkspaceLoaded = saved is not null;
+            _document = saved ?? WorkspaceDefaults.Create();
+            _saveStatus = saved is null ? "New workspace" : _document.Settings.AutoStartAndArmOnStartup
+                ? "Restored - automatic startup pending" : "Restored - sessions not started";
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
         {
@@ -167,6 +171,7 @@ public partial class MainWindow : Window
                     if (runtime.Pending is not null) await SendOutputAsync(runtime);
                 ScheduleSave();
                 await ReplyAsync(request);
+                await RunStartupAutomationAsync();
                 return;
             }
             if (!_ready) throw new InvalidOperationException("The terminal renderer is unavailable. Reload or stop sessions.");
@@ -238,7 +243,7 @@ public partial class MainWindow : Window
                 updated.MainWindow = _document.MainWindow;
                 _document = updated;
                 ScheduleSave();
-                await QueueReviewedStartsAsync([launch]);
+                await QueuePreparedStartsAsync([launch]);
                 return true;
             }
             case "startPane":
@@ -417,6 +422,42 @@ public partial class MainWindow : Window
         WorkspaceValidator.Validate(updated);
     }
 
+    private async Task RunStartupAutomationAsync()
+    {
+        if (_startupAutomationHandled) return;
+        _startupAutomationHandled = true;
+        if (!_savedWorkspaceLoaded || !_persistenceEnabled || !_document.Settings.AutoStartAndArmOnStartup) return;
+        await _commands.WaitAsync();
+        try
+        {
+            if (_shuttingDown || !_ready) return;
+            var panes = _document.Workspace.Tabs.SelectMany(tab => tab.Panes)
+                .Where(pane => !_runtimes.TryGetValue(pane.Id, out var runtime) || !IsBusy(runtime))
+                .Select(WorkspaceJson.Clone).ToArray();
+            var launches = new List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)>();
+            foreach (var pane in panes) launches.Add(await PrepareLaunchAsync(pane));
+            if (_shuttingDown) return;
+            var schedules = new List<ScheduledLaunch>();
+            for (var index = 0; index < launches.Count; index++)
+            {
+                var launch = launches[index];
+                if (launch.Error is not null || launch.Pane.Plan.Recurrence is null || _schedules.ContainsKey(launch.Pane.Id)) continue;
+                try { schedules.Add(CreateScheduledLaunch(launch.Pane, launch.Profile)); }
+                catch (Exception error) when (error is InvalidDataException or InvalidOperationException or ArgumentException)
+                {
+                    launches[index] = (launch.Pane, launch.Profile, "Automatic schedule arming failed: " + error.Message);
+                }
+            }
+            await QueuePreparedStartsAsync(launches);
+            foreach (var schedule in schedules) _schedules[schedule.Pane.Id] = schedule;
+            await PublishStateAsync();
+            var failures = launches.Count(launch => launch.Error is not null);
+            if (failures > 0) await ReportErrorAsync($"Automatic startup: {failures} pane(s) could not start or arm. " +
+                "See their launch errors. Other panes continue normally.");
+        }
+        finally { _commands.Release(); }
+    }
+
     private async Task<bool> QueueStartsAsync(PaneDefinition[] panes, bool resume)
     {
         var launches = new List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)>();
@@ -429,7 +470,7 @@ public partial class MainWindow : Window
         var preview = new StringBuilder("Review executable code before starting. Sessions use your Windows permissions; they are not sandboxes.\n");
         foreach (var (pane, profile, error) in launches) AppendLaunchPreview(preview, pane, profile, error);
         if (!Confirm($"Start {panes.Length} session(s)", preview.ToString(), "Start reviewed sessions")) return false;
-        await QueueReviewedStartsAsync(launches);
+        await QueuePreparedStartsAsync(launches);
         if (launches.All(launch => launch.Error is not null))
             throw new InvalidOperationException("No sessions started. Launch errors are shown on the affected panes.");
         return true;
@@ -474,7 +515,7 @@ public partial class MainWindow : Window
         preview.AppendLine("Startup script:\n" + (profile.StartupScript.Length == 0 ? "(interactive prompt)" : profile.StartupScript));
     }
 
-    private async Task QueueReviewedStartsAsync(List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> launches)
+    private async Task QueuePreparedStartsAsync(List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> launches)
     {
         if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
         foreach (var (pane, profile, error) in launches)
@@ -500,16 +541,22 @@ public partial class MainWindow : Window
         await PublishStateAsync();
     }
 
-    private async Task<bool> ArmScheduleAsync(PaneDefinition pane)
+    private static ScheduledLaunch CreateScheduledLaunch(PaneDefinition pane, LaunchProfile profile)
     {
         if (pane.Plan.Recurrence is null) throw new InvalidOperationException("Edit the pane and configure an hourly, daily, weekday or weekly recurrence first.");
-        if (string.IsNullOrWhiteSpace(pane.Profile.StartupScript))
+        if (string.IsNullOrWhiteSpace(profile.StartupScript))
             throw new InvalidOperationException("A recurring task requires a startup command or script.");
+        var snapshot = WorkspaceJson.Clone(pane);
+        snapshot.Profile = profile;
+        return new ScheduledLaunch(snapshot, DateTimeOffset.UtcNow);
+    }
+
+    private async Task<bool> ArmScheduleAsync(PaneDefinition pane)
+    {
         var (_, profile, error) = await PrepareLaunchAsync(pane);
         if (error is not null) throw new InvalidOperationException("Schedule was not armed: " + error);
-        var reviewed = WorkspaceJson.Clone(pane);
-        reviewed.Profile = profile;
-        var schedule = new ScheduledLaunch(reviewed, DateTimeOffset.UtcNow);
+        var schedule = CreateScheduledLaunch(pane, profile);
+        var reviewed = schedule.Pane;
         var recurrence = reviewed.Plan.Recurrence!;
         var timing = recurrence.Frequency == ScheduleFrequency.Hourly
             ? "At the top of every local hour (:00)"
@@ -517,7 +564,7 @@ public partial class MainWindow : Window
         var preview = new StringBuilder(
             $"Frequency: {recurrence.Frequency}; {timing}\n" +
             $"Time zone: {TimeZoneInfo.Local.DisplayName}\nNext run: {schedule.NextRun.ToLocalTime():F}\n\n" +
-            "Runs only while this app and its renderer are available. Restarting, importing or recovering does not re-arm schedules.\n" +
+            "Runs only while this app and its renderer are available. Automatic startup can start and re-arm saved panes on the next app launch; disable it in Settings for manual-only startup. Import/recovery does not arm schedules in the current app session.\n" +
             "Each run starts a fresh shell and closes it when the startup script finishes. A live or queued pane is never interrupted; that occurrence is skipped.\n" +
             "Occurrences missed by more than one minute are skipped, not replayed. Edits do not change this reviewed snapshot; disarm and review again to apply changes.\n");
         AppendLaunchPreview(preview, reviewed, profile, null);
@@ -540,13 +587,13 @@ public partial class MainWindow : Window
             {
                 ScheduledRunDecision.SkippedBusy => "Skipped: pane still has a live or queued session",
                 ScheduledRunDecision.SkippedMissed => "Skipped: occurrence was missed by more than one minute",
-                _ => "Queued reviewed recurring task"
+                _ => "Queued recurring task"
             };
             if (decision == ScheduledRunDecision.Ready)
             {
                 try
                 {
-                    await QueueReviewedStartsAsync([(schedule.Pane, WorkspaceJson.Clone(schedule.Pane.Profile), null)]);
+                    await QueuePreparedStartsAsync([(schedule.Pane, WorkspaceJson.Clone(schedule.Pane.Profile), null)]);
                 }
                 catch (Exception error)
                 {
@@ -854,7 +901,10 @@ public partial class MainWindow : Window
         var restored = await WorkspaceStore.ReadAsync<ApplicationDocument>(_store.BackupPath);
         WorkspaceValidator.Validate(restored);
         if (!Confirm("Restore backup", "Restore the last saved backup? Its sessions will be not started.\n\n" +
-                $"This stops {BusyCount} live or queued session(s). The current configuration file will be retained.", "Restore backup")) return false;
+                $"This stops {BusyCount} live or queued session(s). The current configuration file will be retained." +
+                (restored.Settings.AutoStartAndArmOnStartup
+                    ? "\n\nThis backup enables automatic startup: its saved commands will run without review on the next normal app launch."
+                    : ""), "Restore backup")) return false;
         await StopAllAsync();
         _saveDelay?.Cancel();
         await _saveTask;
@@ -886,7 +936,10 @@ public partial class MainWindow : Window
         if (!Confirm("Open unstarted workspace",
                 $"Open {workspace.Tabs.Count} tab(s) and {workspace.Tabs.Sum(t => t.Panes.Count)} pane(s)?\n\n" +
                 $"This stops {BusyCount} live or queued session(s) in the current workspace.\n" +
-                "Imported scripts and environment values are executable/sensitive configuration. No scripts will run until you review and start sessions.", "Open layout")) return false;
+                "Imported scripts and environment values are executable/sensitive configuration. No scripts run during this import." +
+                (_document.Settings.AutoStartAndArmOnStartup
+                    ? " Automatic startup is enabled: these saved commands will run without review on the next normal app launch."
+                    : " Review and start sessions manually when ready."), "Open layout")) return false;
         await StopAllAsync();
         _runtimes.Clear();
         _maximized.Clear();

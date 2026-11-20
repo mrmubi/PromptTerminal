@@ -71,7 +71,7 @@ test("branding uses the spaced app title and red command-prompt icon in both the
   });
 });
 
-test("mounts twelve independent terminal views without auto-starting shells", async () => {
+test("mounts twelve independent terminal views without renderer-triggered launches when startup automation is disabled", async () => {
   await withPage(async page => {
     assert.equal(await page.locator(".pane").count(), 12);
     assert.equal(await page.getByRole("tab").count(), 3);
@@ -504,6 +504,24 @@ test("settings and save status identify OneDrive startup-only storage without cl
       await page.getByRole("button", { name: "Cancel", exact: true }).click();
     }
   });
+});
+
+test("automatic startup defaults on and settings changes do not start or arm current panes", async () => {
+  const fixture = documentFixture();
+  delete fixture.settings.autoStartAndArmOnStartup;
+  await withPage(async page => {
+    for (const enabled of [false, true]) {
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      const option = page.getByLabel("Automatically start all panes and arm schedules on app startup", { exact: true });
+      assert.equal(await option.isChecked(), !enabled);
+      assert.match(await page.locator("#dialog-body").innerText(), /without a review dialog/);
+      await option.setChecked(enabled);
+      await page.getByRole("button", { name: "Apply settings", exact: true }).click();
+      assert.equal(await page.evaluate(() => window.__host.snapshot.document.settings.autoStartAndArmOnStartup), enabled);
+    }
+    assert.equal(await page.evaluate(() => window.__host.messages.some(message =>
+      ["startPane", "startWorkspace", "armSchedule"].includes(message.type))), false);
+  }, fixture);
 });
 
 test("new panes default to the existing floating format and allow a deliberate tiled override", async () => {

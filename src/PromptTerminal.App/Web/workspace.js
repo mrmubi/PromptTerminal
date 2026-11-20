@@ -439,7 +439,7 @@
     const scheduled = state.schedules?.find(item => item.paneId === pane.id);
     pane.schedule.textContent = scheduled ? `Next: ${new Date(scheduled.nextRun).toLocaleString()}` :
       definition.plan.recurrence ? "Schedule not armed" : "";
-    pane.schedule.title = scheduled ? `${scheduleSummary(scheduled.recurrence)}\n${scheduled.message}\nReviewed settings remain in effect until disarmed and re-armed.` : "";
+    pane.schedule.title = scheduled ? `${scheduleSummary(scheduled.recurrence)}\n${scheduled.message}\nArmed settings remain in effect until disarmed and re-armed.` : "";
     for (const control of pane.article.querySelectorAll('[data-action="armSchedule"]'))
       control.hidden = !definition.plan.recurrence || !!scheduled;
     for (const control of pane.article.querySelectorAll('[data-action="cancelSchedule"]')) control.hidden = !scheduled;
@@ -452,7 +452,7 @@
     pane.cover.hidden = ["running", "exited", "stopping"].includes(runtime.state);
     let text = runtime.error || ({
       notStarted: "Configure this shell and review its startup command before starting.",
-      queued: "Waiting for the reviewed launch plan. Shell exit or silence is not completion.",
+      queued: "Waiting for its launch conditions. Shell exit or silence is not completion.",
       starting: "Creating an independent PowerShell pseudoconsole..."
     }[runtime.state] || "");
     if (runtime.state === "queued") {
@@ -990,7 +990,7 @@
 
   function openSettings() {
     const settings = clone(state.document.settings);
-    showDialog("Appearance and keyboard", "Changes apply immediately to all terminals without restarting shells. Application shortcuts take precedence over terminal keys; IME/AltGr input is left alone.",
+    showDialog("Appearance and keyboard", "Appearance changes apply immediately without restarting shells. Startup automation applies on the next full app launch. Application shortcuts take precedence over terminal keys; IME/AltGr input is left alone.",
       "Apply settings", body => {
         const grid = element("div", "form-grid");
         body.append(grid);
@@ -1000,10 +1000,12 @@
         field(grid, "scrollback", "Scrollback lines per pane", "number", settings.scrollback, { required: true, min: 100, max: 50000 });
         checkbox(grid, "screenReaderMode", "Enable screen-reader terminal output", settings.screenReaderMode);
         checkbox(grid, "preventSleep", "Prevent automatic sleep / hibernation while app is open", settings.preventSleep);
+        checkbox(grid, "autoStartAndArmOnStartup", "Automatically start all panes and arm schedules on app startup", settings.autoStartAndArmOnStartup ?? true);
         field(grid, "shortcuts", "Keyboard shortcuts (JSON action: gesture)", "textarea", JSON.stringify(settings.shortcuts, null, 2), { full: true, rows: 13 });
         body.append(element("p", "form-note", "Ctrl+Shift+C: copy selection. Ctrl+V / Ctrl+Shift+V / Shift+Insert: confirmed native paste. Ctrl+C: terminal interrupt. Shortcuts can be removed from the JSON to let the shell receive those keys."));
         body.append(element("p", "form-note", "Enable terminal screen-reader output only when needed: xterm changes browser text-insertion/emoji handling in that mode. Verify your screen-reader and IME combination."));
         body.append(element("p", "form-note", "Keep-awake needs no administrator rights and does not change Windows power settings. The display may turn off. Manual sleep/hibernate, shutdown, lid and critical-battery policies can still stop work. Leave the app open for schedules; closing it disarms them. Main window size and maximized state are remembered automatically."));
+        body.append(element("p", "form-note", "Automatic startup is on by default: every saved tab's panes start without a review dialog, and recurring panes run once immediately and arm future runs. Saved scripts, user profiles and OneDrive-synced changes execute with your permissions. Earliest times and explicit dependencies still apply. Changes affect the next app launch, not current sessions or renderer reloads. Disable this option to start and arm manually."));
         if (state.storage) body.append(element("p", "form-note",
           `Configuration file: ${state.storage.path}\n` +
           (state.storage.isOneDrive
@@ -1013,7 +1015,8 @@
         ...settings,
         theme: data.get("theme"), fontFamily: data.get("fontFamily").trim(), fontSize: Number(data.get("fontSize")),
         scrollback: Number(data.get("scrollback")), screenReaderMode: data.has("screenReaderMode"),
-        preventSleep: data.has("preventSleep"), shortcuts: JSON.parse(data.get("shortcuts"))
+        preventSleep: data.has("preventSleep"), autoStartAndArmOnStartup: data.has("autoStartAndArmOnStartup"),
+        shortcuts: JSON.parse(data.get("shortcuts"))
       }));
   }
 
@@ -1025,7 +1028,7 @@
 
   function openSchedules() {
     showDialog("Recurring agent tasks",
-      "Run only while this app is open. Each schedule requires native review and must be re-armed after restart. Running or queued panes are never interrupted; missed runs are not replayed.",
+      "Run only while this app is open. Automatic startup can run saved panes immediately and arm their schedules on app launch; disable it in Settings for manual review/arming. Running or queued panes are never interrupted; missed runs are not replayed.",
       null, body => {
         const render = () => {
           body.replaceChildren();
@@ -1255,7 +1258,7 @@
       body.append(element("p", "form-note",
         "Each pane owns an independent ConPTY and PowerShell process tree. Tabs and layout changes do not restart sessions. " +
         "Separate shells are not filesystem or security isolation; use Git worktrees for independent edits.\n\n" +
-        "Restored/imported workspaces do not execute commands until you review a launch preview. " +
+        "Saved workspaces auto-start all panes and arm recurring tasks by default when the app opens, without a review dialog. Disable automatic startup in Settings for manual-only launches. Import and backup recovery leave sessions unstarted in the current app session; the next normal launch follows that setting. " +
         "Running means only that the shell is alive. Output or silence is never interpreted as completion.\n\n" +
         "Optional explicit PowerShell integration:\n" +
         "Send-PromptTerminalSignal -State working -Message 'Started task'\n" +
@@ -1263,7 +1266,7 @@
         "Send-PromptTerminalSignal -State completed -Message 'Tests passed'\n" +
         "Send-PromptTerminalSignal -State directory -Message $PWD.Path\n\n" +
         "Scheduled dependencies require a new explicit completed signal from the prerequisite launch. " +
-        "Hourly (on the hour), daily, weekday and weekly tasks must be reviewed and armed for each app session. Busy panes and missed runs are skipped; scheduled shells close when their startup script finishes. " +
+        "Hourly (on the hour), daily, weekday and weekly tasks use a fresh immutable snapshot each app session, armed by automatic startup or by manual review. Busy panes and missed runs are skipped; scheduled shells close when their startup script finishes. " +
         "Enable keep-awake in Settings to prevent automatic idle sleep/hibernation without changing Windows power settings.\n\n" +
         "Metrics report shell-host CPU/memory, not agent process trees.\n\n" +
         "Alt+drag a floating title bar over a tiled pane to preview docking. Splitters support arrow keys. " +
