@@ -239,7 +239,7 @@ public partial class MainWindow : Window
                 AppendLaunchPreview(preview, pane, launch.Profile, null);
                 if (!Confirm("Add and start pane", preview.ToString(), "Add and start reviewed pane")) return false;
                 if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
-                UpdateFloatingLayout(updated, growWindow: true);
+                UpdateFloatingLayout(updated);
                 updated.MainWindow = _document.MainWindow;
                 _document = updated;
                 ScheduleSave();
@@ -393,7 +393,7 @@ public partial class MainWindow : Window
         var updated = WorkspaceCommands.Apply(_document, request);
         if (request.Type == "settings") _keepAwake.SetEnabled(updated.Settings.PreventSleep);
         if (request.Type == "workspaceViewport") _workspaceViewport = request.Read<WorkspaceViewport>();
-        UpdateFloatingLayout(updated, request.Type is "addPane" or "duplicatePane" or "toggleFloat" or "movePane");
+        UpdateFloatingLayout(updated);
         updated.MainWindow = _document.MainWindow;
         _document = updated;
         foreach (var tabId in _maximized.Keys.ToArray())
@@ -402,7 +402,7 @@ public partial class MainWindow : Window
         ScheduleSave();
     }
 
-    private void UpdateFloatingLayout(ApplicationDocument updated, bool growWindow, bool arrangeAll = false)
+    private void UpdateFloatingLayout(ApplicationDocument updated, bool arrangeAll = false)
     {
         if (_workspaceViewport is null) return;
         var changed = updated.Workspace.Tabs.Where(tab =>
@@ -412,12 +412,6 @@ public partial class MainWindow : Window
                 !before.Panes.Select(item => item.Id).SequenceEqual(tab.Panes.Select(item => item.Id)) ||
                 !before.Floating.Select(item => item.PaneId).SequenceEqual(tab.Floating.Select(item => item.PaneId));
         }).ToArray();
-        var active = changed.SingleOrDefault(tab => tab.Id == updated.Workspace.ActiveTabId);
-        var previous = _document.Workspace.Tabs.SingleOrDefault(tab => tab.Id == active?.Id);
-        if (growWindow && active is not null && active.Floating.Any(item =>
-                previous is null || previous.Floating.All(old => old.PaneId != item.PaneId)))
-            _workspaceViewport = WindowSizing.GrowForPanes(this, Browser, _workspaceViewport,
-                active.AutoArrangeFloating ? active.Panes.Count : active.Floating.Count);
         foreach (var tab in changed) FloatingLayout.Arrange(tab, _workspaceViewport.Width, _workspaceViewport.Height);
         WorkspaceValidator.Validate(updated);
     }
@@ -912,7 +906,7 @@ public partial class MainWindow : Window
         _saveDelay?.Cancel();
         await _saveTask;
         PreserveOriginal();
-        UpdateFloatingLayout(restored, growWindow: false, arrangeAll: true);
+        UpdateFloatingLayout(restored, arrangeAll: true);
         await _store.SaveAsync(restored);
         _document = restored;
         _persistenceEnabled = true;
@@ -949,7 +943,7 @@ public partial class MainWindow : Window
         _unread.Clear();
         var updated = WorkspaceJson.Clone(_document);
         updated.Workspace = workspace;
-        UpdateFloatingLayout(updated, growWindow: false, arrangeAll: true);
+        UpdateFloatingLayout(updated, arrangeAll: true);
         _document = updated;
         ScheduleSave();
         await PublishStateAsync();

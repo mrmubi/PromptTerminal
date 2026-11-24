@@ -127,6 +127,29 @@ public sealed class FloatingLayoutTests
         WorkspaceValidator.Validate(document);
     }
 
+    [Fact]
+    public void AddingPanesReflowsInsideTheSameViewportWithoutChangingRememberedWindowSize()
+    {
+        var document = FloatingWorkspace(1);
+        document.MainWindow.Width = 1220;
+        document.MainWindow.Height = 1100;
+        for (var count = 2; count <= 8; count++)
+        {
+            var tab = document.Workspace.Tabs[0];
+            document = WorkspaceCommands.Apply(document,
+                Request("addPane", new PaneCreation(tab.Id, tab.ActivePaneId, null, null, new())));
+            document = WorkspaceCommands.Apply(document,
+                Request("workspaceViewport", new WorkspaceViewport(1200, 900, 1220)));
+            var placements = document.Workspace.Tabs[0].Floating;
+            Assert.Equal(count, placements.Count);
+            Assert.Equal(1220, document.MainWindow.Width);
+            Assert.Equal(1100, document.MainWindow.Height);
+            Assert.Single(placements.Select(pane => pane.Width).Distinct());
+            Assert.Single(placements.Select(pane => pane.Height).Distinct());
+            Assert.All(placements, pane => Assert.True(pane.X + pane.Width <= 1190 && pane.Y + pane.Height <= 890));
+        }
+    }
+
     [Theory]
     [InlineData(double.NaN, 900)]
     [InlineData(1200, double.PositiveInfinity)]
@@ -223,7 +246,6 @@ public sealed class FloatingLayoutTests
         Assert.True(document.Workspace.Tabs[0].AutoArrangeFloating);
         Assert.Equal(10, document.Workspace.Tabs[0].Floating[0].X);
         Assert.False(document.Settings.PreventSleep);
-        Assert.Equal(1232, FloatingLayout.PreferredWorkspaceWidth(2));
     }
 
     [Fact]

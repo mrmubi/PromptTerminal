@@ -338,7 +338,7 @@ async function runFloatingLayout(port) {
   survivor.name = "Layout survivor";
   survivor.profile.workingDirectory = root;
   survivor.profile.startupScript = "[Console]::WriteLine('LAYOUT-SURVIVOR'); " +
-    "0..79 | ForEach-Object { [Console]::WriteLine(('LAYOUT-HISTORY-{0:D3}' -f $_)) }; " +
+    "0..1999 | ForEach-Object { [Console]::WriteLine(('LAYOUT-HISTORY-{0:D4}' -f $_)) }; " +
     "[Console]::WriteLine('LAYOUT-HISTORY-READY')";
   fixture.profiles[0].workingDirectory = root;
   await fs.writeFile(path.join(dataDirectory, "workspace.json"), JSON.stringify(fixture));
@@ -356,17 +356,16 @@ async function runFloatingLayout(port) {
   });
   const monitor = await windowGeometry(), scale = monitor.dpi / 96;
   const compact = { left: monitor.workLeft, top: monitor.workTop,
-    width: Math.round(820 * scale), height: Math.min(monitor.workBottom - monitor.workTop, Math.round(760 * scale)) };
+    width: Math.min(monitor.workRight - monitor.workLeft, Math.round(1000 * scale)),
+    height: Math.min(monitor.workBottom - monitor.workTop, Math.round(900 * scale)) };
   const initial = await windowGeometry("restore", compact);
   await page.getByRole("button", { name: "Start pane Layout survivor", exact: true }).click();
   await nativeButton("Start 1 session(s)", "Start reviewed sessions");
   await waitOutput(page, survivor.id, "LAYOUT-HISTORY-READY");
   const baseline = await renderedTranscript(page, survivor.id);
-  const visibleRows = await page.locator(`.pane[data-pane-id="${survivor.id}"] .xterm-rows > div`).count();
-  assert.ok(visibleRows > 0);
-  // ConPTY can redraw the live screen on resize; independently verify the older scrollback.
-  const history = baseline.split(/\r?\n/).slice(0, -visibleRows).filter(line => /^LAYOUT-HISTORY-\d{3}$/.test(line));
-  assert.ok(history.length >= 20);
+  // Keep the checked scrollback well outside the live screen that ConPTY redraws on resize.
+  const history = baseline.split(/\r?\n/).filter(line => /^LAYOUT-HISTORY-\d{4}$/.test(line)).slice(0, 1000);
+  assert.equal(history.length, 1000);
   assert.match(baseline, /LAYOUT-SURVIVOR/, "The history marker starts in scrollback");
   const pid = await processId(page, survivor.id);
   const generation = await page.locator(`.pane[data-pane-id="${survivor.id}"]`).getAttribute("data-generation");
@@ -377,38 +376,61 @@ async function runFloatingLayout(port) {
     await page.getByLabel("Pane name", { exact: true }).fill(`Automatic floating ${index}`);
     await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
     await page.waitForFunction(count => window.__floatingState?.document.workspace.tabs[0].panes.length === count, index);
-    return assertFloatingGrid(page, index);
+    const grid = await assertFloatingGrid(page, index);
+    const bounds = await windowGeometry();
+    assert.equal(bounds.width, initial.width, "Adding a pane does not grow the main window");
+    assert.equal(bounds.height, initial.height, "Adding a pane does not change the main window height");
+    return grid;
   }
   await addPane(2);
-  const grown = await windowGeometry();
-  if (initial.width < initial.workRight - initial.workLeft) assert.ok(grown.width > initial.width);
-  assert.equal(grown.height, initial.height);
-  assert.ok(grown.left >= grown.workLeft && grown.right <= grown.workRight);
-  assert.equal(grown.maximized, false);
-  console.log("PASS: new panes float by default, promote tiled panes, widen the native window and preserve height within the current monitor");
+  console.log("PASS: new panes float by default and promote tiled panes into an equal grid without changing the main window size");
   await sendCommand(page, survivor.id, "[Console]::WriteLine('LAYOUT-FOCUSED-EARLIER')");
   await waitOutput(page, survivor.id, "LAYOUT-FOCUSED-EARLIER");
   await paneAction(page, survivor.id, "Duplicate as new pane");
   await assertFloatingGrid(page, 3);
-  const capCount = Math.max(4, Math.ceil((monitor.workRight - monitor.workLeft) / scale / 600) + 2);
-  for (let count = 4; count <= capCount; count++) await addPane(count);
+  assert.equal((await windowGeometry()).width, initial.width, "Duplicating does not grow the window");
+  const paneCount = 6;
+  for (let count = 4; count <= paneCount; count++) await addPane(count);
+  const compactGrid = await assertFloatingGrid(page, paneCount);
+  await page.getByRole("button", { name: "Tab options", exact: true }).click();
+  await page.getByLabel("Auto-arrange floating panes in an equal grid").uncheck();
+  await page.getByRole("button", { name: "Save tab", exact: true }).click();
+  const wider = Math.min(monitor.workRight - monitor.workLeft, Math.round(1900 * scale));
+  await windowGeometry("restore", { ...compact, width: wider });
+  await page.waitForFunction(() => window.__floatingState?.document.workspace.tabs[0].autoArrangeFloating === false);
+  assert.equal(await page.locator(".pane.floating").first().evaluate(pane => pane.offsetWidth), compactGrid.placements[0].width,
+    "Manual layout remains fixed until auto-arrange is enabled");
+  await page.getByRole("button", { name: "Tab options", exact: true }).click();
+  await page.getByLabel("Auto-arrange floating panes in an equal grid").check();
+  await page.getByRole("button", { name: "Save tab", exact: true }).click();
   const wide = await windowGeometry();
-  assert.equal(wide.width, wide.workRight - wide.workLeft);
-  const wideGrid = await assertFloatingGrid(page, capCount);
+  const wideGrid = await assertFloatingGrid(page, paneCount);
   await windowGeometry("restore", compact);
-  const narrowGrid = await assertFloatingGrid(page, capCount);
-  assert.ok(narrowGrid.placements[0].width < wideGrid.placements[0].width ||
+  const narrowGrid = await assertFloatingGrid(page, paneCount);
+  if (wide.width > initial.width) assert.ok(narrowGrid.placements[0].width < wideGrid.placements[0].width ||
     narrowGrid.placements.at(-1).y > wideGrid.placements.at(-1).y);
   assert.equal((await windowGeometry()).width, initial.width, "Reflow does not undo a user's narrower window size");
   const reports = await page.evaluate(() => window.__floatingViewportReports);
   await page.waitForTimeout(500);
   assert.equal(await page.evaluate(() => window.__floatingViewportReports), reports, "Viewport reporting stabilizes without a resize loop");
-  await windowGeometry("restore", { ...compact, width: wide.width });
-  await assertFloatingGrid(page, capCount);
+  await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+  await page.getByLabel("Pane name", { exact: true }).fill("Fixed-window started");
+  await page.getByLabel("Startup command or multiline PowerShell script").fill("[Console]::WriteLine('STARTED-FIXED-WINDOW')");
+  await page.getByLabel("Recurring task", { exact: true }).selectOption("hourly");
+  await page.getByRole("button", { name: "Add and start pane", exact: true }).click();
+  await nativeButton("Add and start pane", "Add and start reviewed pane");
+  await assertFloatingGrid(page, paneCount + 1);
+  const startedId = await page.getByRole("region", { name: "Fixed-window started pane", exact: true }).getAttribute("data-pane-id");
+  await waitOutput(page, startedId, "STARTED-FIXED-WINDOW");
+  await page.waitForSelector(`.pane[data-pane-id="${startedId}"][data-state="exited"]`);
+  assert.equal((await windowGeometry()).width, initial.width, "Reviewed add-and-start does not grow the window");
   const normal = await windowGeometry();
-  await windowGeometry("maximize");
-  await addPane(capCount + 1);
+  const maximized = await windowGeometry("maximize");
+  await page.getByRole("button", { name: "+ Pane", exact: true }).click();
+  await page.getByRole("button", { name: "Add unstarted pane", exact: true }).click();
+  await assertFloatingGrid(page, paneCount + 2);
   assert.equal((await windowGeometry()).maximized, true, "Adding a pane never unmaximizes the window");
+  assert.equal((await windowGeometry()).width, maximized.width);
   const docked = await page.evaluate(() => window.__floatingState.document.workspace.tabs[0].panes.at(-1).id);
   await page.locator(`.pane[data-pane-id="${docked}"]`).getByRole("button", { name: /Float or dock/ }).click();
   await page.getByRole("button", { name: "Dock pane", exact: true }).click();
@@ -419,17 +441,17 @@ async function runFloatingLayout(port) {
   await page.getByRole("button", { name: "Tab options", exact: true }).click();
   await page.getByLabel("Auto-arrange floating panes in an equal grid").check();
   await page.getByRole("button", { name: "Save tab", exact: true }).click();
-  await assertFloatingGrid(page, capCount + 1);
+  await assertFloatingGrid(page, paneCount + 2);
   assert.equal(await processId(page, survivor.id), pid);
   assert.equal(await page.locator(`.pane[data-pane-id="${survivor.id}"]`).getAttribute("data-generation"), generation);
   assert.equal(await page.evaluate(id => window.__survivorTerminal ===
     document.querySelector(`[data-pane-id="${id}"] .xterm`), survivor.id), true);
   const transcript = await renderedTranscript(page, survivor.id);
   assert.match(transcript, /LAYOUT-SURVIVOR/);
-  assert.deepEqual(transcript.split(/\r?\n/).filter(line => /^LAYOUT-HISTORY-\d{3}$/.test(line)).slice(0, history.length), history);
-  console.log("PASS: creation-order grids, monitor cap, responsive rows/columns and maximized additions retain the real shell, generation, terminal and history");
+  assert.deepEqual(transcript.split(/\r?\n/).filter(line => /^LAYOUT-HISTORY-\d{4}$/.test(line)).slice(0, history.length), history);
+  console.log("PASS: enabling auto-arrange fixes fixed-size panes; resize/add/duplicate/start reflow within the chosen window while preserving the real shell, generation, terminal and history");
   const saved = await savedDocument(document => document.mainWindow?.maximized &&
-    document.workspace.tabs[0].floating.length === capCount + 1 &&
+    document.workspace.tabs[0].floating.length === paneCount + 2 &&
     Math.abs(document.mainWindow.width - normal.width / scale) < 3 &&
     Math.abs(document.mainWindow.height - normal.height / scale) < 3);
   assert.equal(saved.workspace.tabs[0].autoArrangeFloating, true);
@@ -439,10 +461,10 @@ async function runFloatingLayout(port) {
   await browser.close();
   browser = null;
   page = await startApplication(await freePort());
-  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), capCount + 1);
+  assert.equal(await page.locator(".pane[data-state='notStarted']").count(), paneCount + 2);
   assert.equal((await windowGeometry()).maximized, true);
   const restored = await windowGeometry("restore");
-  assert.ok(Math.abs(restored.width - normal.width) < 4, "Automatic width growth restores as the normal window width");
+  assert.ok(Math.abs(restored.width - normal.width) < 4, "The user-selected normal window width is restored");
   assert.ok(Math.abs(restored.height - normal.height) < 4, "The normal window height is retained");
   assert.doesNotMatch(await page.locator(".xterm-screen").allTextContents().then(text => text.join("")), /LAYOUT-SURVIVOR/);
   console.log("PASS: grid membership, normal window bounds and maximized state persist without restarting commands");

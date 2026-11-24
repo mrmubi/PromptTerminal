@@ -105,13 +105,16 @@ Alt+drag a floating title bar over a tiled pane to preview docking, or use its
 New panes and duplicates **float by default**, even in a tiled-only tab. They
 append after the last pane, not the most recently focused pane. By default,
 adding a floating pane brings all panes in that tab into an equal-sized grid,
-so no tiled panes are hidden underneath. The main window widens to make room
-without exceeding the current monitor's work area or changing its height.
-At the width limit, or when you resize the window yourself, panes reflow into
-rows and columns. Adding a pane never unmaximizes the window.
+so no tiled panes are hidden underneath. **Adding, duplicating or starting a new
+pane never enlarges the main window.** With auto-arrange enabled, panes resize
+into equal rows and columns within the current window, both when panes are added
+and when you resize it yourself. Adding a pane never unmaximizes the window.
+If the available space cannot fit the minimum usable pane sizes, the workspace
+scrolls rather than overlapping panes or enlarging the app.
 
 Use **Tab options > Auto-arrange floating panes in an equal grid** to turn
 automatic reflow off for persistent free positioning, or back on to restore it.
+If resizing leaves panes fixed, check this per-tab option is enabled.
 Manual pane moves/resizes in automatic mode last until the next reflow.
 Uncheck **Create as floating panel**, explicitly **Split right / below**, or
 **Dock** to opt that tab into manual hybrid layout instead. Tiled additions
@@ -341,7 +344,7 @@ and hourly schedule arming at the next local hour.
 Use `--recurring-defaults-only` to focus on recurring manual-launch auto-close,
 normal interactive prompts, reviewed add-and-start and actual scheduled/busy runs.
 Use `--floating-layout-only` for native default-floating creation, duplication,
-equal grid reflow, monitor-limited window growth, normal/maximized restore and
+equal grid reflow, fixed window size on add/duplicate/reviewed start, normal/maximized restore and
 live process/terminal-history preservation.
 Use `--activity-only` for real manual and scheduled output with integration
 disabled, explicit working/waiting/completed animation overrides, idle-shell

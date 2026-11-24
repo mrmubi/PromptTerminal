@@ -97,9 +97,10 @@ worktrees for agents making independent changes.
   floats. Append in creation order, independent of focus or front-to-back order.
 - Enable an equal-sized automatic floating grid per tab by default. Once a float
   exists, include all panes in that tab instead of obscuring tiled panes below it.
-- On floating additions, widen the normal main window to accommodate panels,
-  constrained to the current monitor's work area. Never shrink it, change its
-  height, or restore a maximized window to do this.
+- Keep the user-selected main window size when adding, duplicating or adding
+  and starting panes. With automatic arrangement enabled, resize/reflow panes
+  inside the current viewport rather than enlarging the window. Never restore
+  a maximized window to make room.
 - Reflow the grid into rows and columns on user window resizing and DPI changes,
   preserving process identities, terminal instances, history and pane order.
 - Expose a saved per-tab automatic-grid toggle. Explicit tiled creation,

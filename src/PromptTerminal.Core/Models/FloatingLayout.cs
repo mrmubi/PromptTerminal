@@ -8,9 +8,6 @@ public static class FloatingLayout
     public const double MinimumHeight = 180;
     public const double PreferredWidth = 600;
 
-    public static double PreferredWorkspaceWidth(int count) =>
-        count <= 0 ? 0 : Inset * 2 + count * PreferredWidth + (count - 1) * Gap;
-
     public static bool Arrange(WorkspaceTab tab, double width, double height)
     {
         if (!double.IsFinite(width) || !double.IsFinite(height) ||
