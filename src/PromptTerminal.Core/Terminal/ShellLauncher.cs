@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using PromptTerminal.Core.Models;
@@ -15,30 +16,67 @@ public static class ShellLauncher
 
     public static string FindDefaultShell()
     {
-        var programFiles = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles);
-        var installed = Path.Combine(programFiles, "PowerShell", "7", "pwsh.exe");
-        if (File.Exists(installed)) return installed;
-        var pwsh = FindOnPath("pwsh.exe");
-        if (pwsh is not null) return pwsh;
-        return Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.System),
-            "WindowsPowerShell", "v1.0", "powershell.exe");
+        try
+        {
+            ResolveExecutable("pwsh.exe");
+            return "pwsh.exe";
+        }
+        catch (FileNotFoundException)
+        {
+            return "powershell.exe";
+        }
     }
 
     public static string ResolveExecutable(string executable)
     {
+        var name = Path.GetFileName(System.Environment.ExpandEnvironmentVariables(executable));
+        return ResolveExecutable(executable, FindShellCandidates(name));
+    }
+
+    internal static string ResolveExecutable(string executable, IEnumerable<string> alternatives)
+    {
         var expanded = System.Environment.ExpandEnvironmentVariables(executable);
-        var resolved = Path.IsPathFullyQualified(expanded) ? expanded : FindOnPath(expanded);
-        if (resolved is null || !File.Exists(resolved))
-            throw new FileNotFoundException($"PowerShell executable was not found: {executable}");
-        var name = Path.GetFileName(resolved);
+        var name = Path.GetFileName(expanded);
         if (!name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase) &&
             !name.Equals("powershell.exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Choose pwsh.exe (PowerShell 7) or powershell.exe (Windows PowerShell).");
-        if (name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase) &&
-            resolved.Contains("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase) &&
-            new FileInfo(resolved).Length == 0)
-            resolved = AliasTargets.GetOrAdd(resolved, ResolvePackagedAlias);
-        return Path.GetFullPath(resolved);
+
+        var candidates = alternatives;
+        if (Path.IsPathFullyQualified(expanded) ||
+            expanded.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
+            candidates = candidates.Prepend(expanded);
+        var failures = new List<string>();
+        var searched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
+        {
+            if (!Path.GetFileName(candidate).Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                !searched.Add(candidate)) continue;
+            if (!File.Exists(candidate)) continue;
+            try
+            {
+                var resolved = candidate;
+                if (name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase) &&
+                    candidate.Contains("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase) &&
+                    new FileInfo(candidate).Length == 0)
+                {
+                    if (AliasTargets.TryGetValue(candidate, out var cached) && !File.Exists(cached))
+                        AliasTargets.TryRemove(candidate, out _);
+                    resolved = AliasTargets.GetOrAdd(candidate, ResolvePackagedAlias);
+                }
+                return Path.GetFullPath(resolved);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception)
+            {
+                failures.Add($"{candidate}: {error.Message}");
+            }
+        }
+        var guidance = name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase)
+            ? "Install PowerShell 7 on this PC or explicitly select powershell.exe (Windows PowerShell 5.1) in the pane settings. PowerShell 7 is never replaced with Windows PowerShell automatically."
+            : "Select an installed Windows PowerShell executable in the pane settings.";
+        throw new FileNotFoundException(
+            $"PowerShell executable was not found or could not be resolved: {executable}\n{guidance}" +
+            $"\nSearched: {string.Join("; ", searched)}" +
+            (failures.Count == 0 ? "" : "\nResolution errors: " + string.Join("; ", failures)), executable);
     }
 
     private static string ResolvePackagedAlias(string alias)
@@ -67,10 +105,13 @@ public static class ShellLauncher
         return target;
     }
 
-    public static ShellLaunch Build(LaunchProfile profile, Guid paneId, string? signalPipe = null)
+    public static ShellLaunch Build(LaunchProfile profile, Guid paneId, string? signalPipe = null,
+        bool allowShellDiscovery = true)
     {
         WorkspaceValidator.Validate(profile);
-        var executable = ResolveExecutable(profile.Executable);
+        var executable = allowShellDiscovery
+            ? ResolveExecutable(profile.Executable)
+            : ResolveExecutable(profile.Executable, []);
         var directory = Path.GetFullPath(System.Environment.ExpandEnvironmentVariables(profile.WorkingDirectory));
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException($"Working directory does not exist: {directory}");
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -125,17 +166,30 @@ public static class ShellLauncher
         return new ShellLaunch(executable, arguments, directory, environment);
     }
 
-    private static string? FindOnPath(string executable)
+    private static IEnumerable<string> FindShellCandidates(string executable)
     {
-        if (executable.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
-            return File.Exists(executable) ? Path.GetFullPath(executable) : null;
+        var local = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
+        if (executable.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            var programFiles = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles);
+            if (!string.IsNullOrEmpty(programFiles))
+                yield return Path.Combine(programFiles, "PowerShell", "7", executable);
+            if (!string.IsNullOrEmpty(local))
+                yield return Path.Combine(local, "Microsoft", "PowerShell", "7", executable);
+        }
+        else if (executable.Equals("powershell.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            var system = System.Environment.GetFolderPath(System.Environment.SpecialFolder.System);
+            if (!string.IsNullOrEmpty(system))
+                yield return Path.Combine(system, "WindowsPowerShell", "v1.0", executable);
+        }
         foreach (var entry in (System.Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
             if (string.IsNullOrWhiteSpace(entry)) continue;
-            var candidate = Path.Combine(entry.Trim('"'), executable);
-            if (File.Exists(candidate)) return candidate;
+            yield return Path.Combine(entry.Trim().Trim('"'), executable);
         }
-        return null;
+        if (executable.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(local))
+            yield return Path.Combine(local, "Microsoft", "WindowsApps", executable);
     }
 
     private const string SignalFunction = """

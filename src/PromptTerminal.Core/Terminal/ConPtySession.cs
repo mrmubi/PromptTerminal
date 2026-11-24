@@ -41,9 +41,9 @@ public sealed class ConPtySession : IAsyncDisposable
     public bool IsRunning => _completion is { IsCompleted: false } && !_stop.IsCancellationRequested;
 
     public static async Task<ConPtySession> StartAsync(LaunchProfile profile, Guid paneId,
-        string? signalPipe = null, int columns = 100, int rows = 30)
+        string? signalPipe = null, int columns = 100, int rows = 30, bool allowShellDiscovery = true)
     {
-        var launch = await Task.Run(() => ShellLauncher.Build(profile, paneId, signalPipe));
+        var launch = await Task.Run(() => ShellLauncher.Build(profile, paneId, signalPipe, allowShellDiscovery));
         var session = new ConPtySession();
         var success = false;
         try

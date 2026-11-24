@@ -59,8 +59,20 @@ validation leaves the dialog open without adding a pane. **Add unstarted pane**
 remains the default action, including when submitting with Enter.
 
 PowerShell 7 is selected for a new configuration when available; otherwise the
-default profile explicitly names Windows PowerShell. A configured executable is
-never silently replaced by another shell.
+default profile explicitly names Windows PowerShell. New defaults use portable
+shell names rather than PC-specific paths. An existing explicit path is honored
+when available. If a saved path is missing or its Windows Store alias cannot be
+resolved, the app searches this PC for the same shell: standard machine/user
+installations, PATH, and the current user's Store alias. Store aliases are resolved
+to the actual executable before launch; stale cached Store targets are refreshed.
+Manual launch reviews show the configured and resolved shell paths.
+Resolution does not rewrite the synced profile. Once prepared for launch or
+scheduling, the resolved executable stays pinned; if it disappears before launch,
+the pane fails visibly rather than switching executables after review.
+PowerShell 7 is never automatically replaced with Windows PowerShell 5.1 (or vice
+versa). If the selected shell is unavailable, install it locally or explicitly
+change the pane's shell; the error lists searched paths and alias-resolution
+failures. This also applies to automatic startup of synced workspaces.
 
 ## Included features
 

@@ -503,6 +503,8 @@ public partial class MainWindow : Window
     private void AppendLaunchPreview(StringBuilder preview, PaneDefinition pane, LaunchProfile profile, string? error)
     {
         preview.AppendLine($"\n--- {pane.Name} ---\nShell: {profile.Executable}\nInitial directory: {profile.WorkingDirectory}");
+        if (!profile.Executable.Equals(pane.Profile.Executable, StringComparison.OrdinalIgnoreCase))
+            preview.AppendLine($"Configured shell: {pane.Profile.Executable} (resolved locally above)");
         if (error is not null) preview.AppendLine("WILL NOT START - validation failed: " + error);
         preview.AppendLine($"User profile: {(profile.LoadUserProfile ? "loaded (also executes code)" : "not loaded")}; keep open: {profile.KeepShellOpen}");
         if (pane.Plan.Recurrence is not null)
@@ -650,7 +652,8 @@ public partial class MainWindow : Window
             runtime.Listener = new SessionSignalListener(
                 signal => Dispatcher.InvokeAsync(() => OnSignalAsync(runtime, signal)).Task.Unwrap(),
                 message => Dispatcher.InvokeAsync(() => ReportErrorAsync("Shell integration: " + message)).Task.Unwrap());
-            runtime.Session = await ConPtySession.StartAsync(runtime.Profile, runtime.PaneId, runtime.Listener.PipeName);
+            runtime.Session = await ConPtySession.StartAsync(runtime.Profile, runtime.PaneId, runtime.Listener.PipeName,
+                allowShellDiscovery: false);
             if (runtime.StopRequested || _shuttingDown)
             {
                 await runtime.Session.DisposeAsync();

@@ -128,6 +128,16 @@ Each pane supports:
 Recommend PowerShell 7 when installed. Windows PowerShell 5.1 can be selected
 explicitly and must have its own compatibility tests. Do not silently substitute
 one shell version for another.
+Use portable shell names for new defaults. Honor an available explicit executable
+path; for missing paths or broken Store aliases, discover only the same shell
+family in local standard installations, PATH and the current user's Store alias.
+Resolve aliases to real executables and refresh cached targets removed by Store
+updates. Manual review shows the configured and resolved paths. Automatic startup
+uses the same resolution rules. If no matching shell is available, show an
+actionable installation/selection error with searched paths and resolution failures.
+Do not rewrite synced profiles during resolution. Prepared launches and schedules
+pin the resolved executable and fail if it disappears rather than rediscovering a
+different executable after review.
 
 Allow saving reusable launch profiles. Editing a profile must not modify a
 running process. Apply changes to future launches or an explicitly confirmed
