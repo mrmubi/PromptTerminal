@@ -38,8 +38,10 @@ choose **Review and start** or **Start workspace**. The native preview shows the
 resolved executable, scripts, environment overrides and launch conditions.
 **Automatic startup is enabled by default**, including for existing saved
 configurations that do not yet contain the setting. On a normal app launch,
-every saved tab's panes start without a review dialog. Recurring panes run once
-immediately and arm their future occurrences; earliest times and explicit
+every saved tab's panes start without a review dialog. The first eligible pane
+starts immediately, with a 10-second delay between subsequent automatic pane
+starts across all tabs. Manual starts and future recurring runs are not delayed.
+Recurring panes run once during this staggered startup and arm their future occurrences; earliest times and explicit
 dependencies still apply. Disable **Settings > Automatically start all panes
 and arm schedules on app startup** for manual-only startup.
 

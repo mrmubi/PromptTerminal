@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private bool _windowPreferencesLoaded;
     private bool _storageConflict;
     private bool _savedWorkspaceLoaded, _startupAutomationHandled;
+    private long? _lastAutomaticStart;
     private CoreWebView2? _activeCore;
     private bool _persistenceEnabled = true, _dark = true;
     private int _ticks;
@@ -442,7 +443,7 @@ public partial class MainWindow : Window
                     launches[index] = (launch.Pane, launch.Profile, "Automatic schedule arming failed: " + error.Message);
                 }
             }
-            await QueuePreparedStartsAsync(launches);
+            await QueuePreparedStartsAsync(launches, automaticStartup: true);
             foreach (var schedule in schedules) _schedules[schedule.Pane.Id] = schedule;
             await PublishStateAsync();
             var failures = launches.Count(launch => launch.Error is not null);
@@ -511,7 +512,8 @@ public partial class MainWindow : Window
         preview.AppendLine("Startup script:\n" + (profile.StartupScript.Length == 0 ? "(interactive prompt)" : profile.StartupScript));
     }
 
-    private async Task QueuePreparedStartsAsync(List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> launches)
+    private async Task QueuePreparedStartsAsync(List<(PaneDefinition Pane, LaunchProfile Profile, string? Error)> launches,
+        bool automaticStartup = false)
     {
         if (_shuttingDown) throw new InvalidOperationException("The application is shutting down.");
         foreach (var (pane, profile, error) in launches)
@@ -522,7 +524,8 @@ public partial class MainWindow : Window
             _runtimes[pane.Id] = new PaneRuntime(pane.Id, generation, profile, WorkspaceJson.Clone(pane.Plan))
             {
                 State = error is null ? "queued" : "failed",
-                Error = error
+                Error = error,
+                AutomaticStartup = automaticStartup
             };
         }
         var launchIds = launches.Select(launch => launch.Pane.Id).ToHashSet();
@@ -630,8 +633,11 @@ public partial class MainWindow : Window
                     if (prerequisite is null || prerequisite.Generation != runtime.DependencyGeneration || prerequisite.Signal != "completed") continue;
                 }
                 if (runtime.Plan.NotBefore > DateTimeOffset.UtcNow) continue;
+                if (runtime.AutomaticStartup && _lastAutomaticStart is { } lastStart &&
+                    Stopwatch.GetElapsedTime(lastStart) < TimeSpan.FromSeconds(10)) continue;
                 runtime.LaunchTask = LaunchAsync(runtime);
                 await runtime.LaunchTask;
+                if (runtime.AutomaticStartup) _lastAutomaticStart = Stopwatch.GetTimestamp();
             }
         }
         finally { _checkingQueue = false; }
@@ -1246,6 +1252,7 @@ public partial class MainWindow : Window
         public string? Branch { get; set; }
         public long DependencyGeneration { get; set; }
         public bool StopRequested { get; set; }
+        public bool AutomaticStartup { get; init; }
         public CancellationTokenSource Stop { get; } = new();
         public ConPtySession? Session { get; set; }
         public SessionSignalListener? Listener { get; set; }

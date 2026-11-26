@@ -562,7 +562,7 @@ async function runAutomaticStartup(port) {
   const allPanes = fixture.workspace.tabs.flatMap(tab => tab.panes);
   const configuration = path.join(dataDirectory, "workspace.json");
   const marker = pane => path.join(dataDirectory, `startup-${pane.id}.txt`);
-  const script = pane => `Add-Content -LiteralPath ${quote(marker(pane))} -Value 'run'; [Console]::WriteLine('AUTO-${pane.id}')`;
+  const script = pane => `Add-Content -LiteralPath ${quote(marker(pane))} -Value (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('O'); [Console]::WriteLine('AUTO-${pane.id}')`;
   for (const pane of allPanes) {
     pane.profile.workingDirectory = root;
     pane.profile.startupScript = script(pane);
@@ -573,7 +573,7 @@ async function runAutomaticStartup(port) {
   const daily = new Date(Date.now() + 6 * 60 * 60 * 1000);
   recurring.plan.recurrence = { frequency: "daily",
     time: [daily.getHours(), daily.getMinutes(), daily.getSeconds()].map(value => String(value).padStart(2, "0")).join(":"), day: "monday" };
-  invalid.profile.executable = path.join(dataDirectory, "missing", "pwsh.exe");
+  invalid.profile.workingDirectory = path.join(dataDirectory, "missing");
   blank.profile.startupScript = "";
   blank.plan.recurrence = { frequency: "hourly", time: "00:00:00", day: "monday" };
   later.plan.notBefore = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -591,10 +591,11 @@ async function runAutomaticStartup(port) {
       assert.equal(await page.locator(`.pane[data-pane-id="${pane.id}"]`).getAttribute("data-generation"), "1");
     assert.match(await page.locator(`.pane[data-pane-id="${recurring.id}"] .pane-schedule`).textContent(), /^Next:/);
     assert.match(await page.locator(`.pane[data-pane-id="${blank.id}"] .failed-text`).textContent(), /requires a startup command/);
-    assert.match(await page.locator(`.pane[data-pane-id="${invalid.id}"] .failed-text`).textContent(), /not found/);
+    assert.match(await page.locator(`.pane[data-pane-id="${invalid.id}"] .failed-text`).textContent(), /does not exist/);
     assert.equal((await page.locator(".pane-schedule").allTextContents()).filter(text => text.startsWith("Next:")).length, 1);
   }
   async function markerCounts(expected) {
+    const starts = [];
     for (const pane of [parent, recurring, dependent]) {
       let count = 0;
       for (let attempt = 0; attempt < 100; attempt++) {
@@ -608,7 +609,12 @@ async function runAutomaticStartup(port) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       assert.equal(count, expected, `The startup command ran exactly ${expected} time(s) for ${pane.name}`);
+      const timestamps = (await fs.readFile(marker(pane), "utf8")).trim().split(/\r?\n/);
+      starts.push(Date.parse(timestamps[expected - 1]));
     }
+    for (let index = 1; index < starts.length; index++)
+      assert.ok(starts[index] - starts[index - 1] >= 10000,
+        "Automatic pane process starts are at least 10 seconds apart, including across tabs");
     for (const pane of [invalid, blank, later])
       await assert.rejects(fs.access(marker(pane)), { code: "ENOENT" });
   }
@@ -628,7 +634,7 @@ async function runAutomaticStartup(port) {
   await started();
   await markerCounts(1);
   const parentPid = await processId(page, parent.id), dependentPid = await processId(page, dependent.id);
-  console.log("PASS: missing startup setting defaults on; every saved tab starts without review, recurring panes run now and arm future runs, invalid panes fail independently, dependencies and earliest times remain enforced");
+  console.log("PASS: automatic startup spaces pane starts at least 10 seconds apart across tabs; recurring panes run and arm, invalid panes fail independently, dependencies and earliest times remain enforced");
   await paneAction(page, recurring.id, "Disarm recurring task");
   await page.evaluate(id => window.chrome.webview.postMessage({
     version: 1, id, type: "rendererError", paneId: null, generation: null, data: { text: "Startup duplication regression" }

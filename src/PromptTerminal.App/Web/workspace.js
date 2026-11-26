@@ -1005,7 +1005,7 @@
         body.append(element("p", "form-note", "Ctrl+Shift+C: copy selection. Ctrl+V / Ctrl+Shift+V / Shift+Insert: confirmed native paste. Ctrl+C: terminal interrupt. Shortcuts can be removed from the JSON to let the shell receive those keys."));
         body.append(element("p", "form-note", "Enable terminal screen-reader output only when needed: xterm changes browser text-insertion/emoji handling in that mode. Verify your screen-reader and IME combination."));
         body.append(element("p", "form-note", "Keep-awake needs no administrator rights and does not change Windows power settings. The display may turn off. Manual sleep/hibernate, shutdown, lid and critical-battery policies can still stop work. Leave the app open for schedules; closing it disarms them. Main window size and maximized state are remembered automatically."));
-        body.append(element("p", "form-note", "Automatic startup is on by default: every saved tab's panes start without a review dialog, and recurring panes run once immediately and arm future runs. Saved scripts, user profiles and OneDrive-synced changes execute with your permissions. Earliest times and explicit dependencies still apply. Changes affect the next app launch, not current sessions or renderer reloads. Disable this option to start and arm manually."));
+        body.append(element("p", "form-note", "Automatic startup is on by default: every saved tab's panes start without a review dialog. The first eligible pane starts immediately, then automatic pane starts are spaced 10 seconds apart across all tabs. Recurring panes run once during staggered startup and arm future runs; manual starts and future recurring runs are not delayed. Saved scripts, user profiles and OneDrive-synced changes execute with your permissions. Earliest times and explicit dependencies still apply. Changes affect the next app launch, not current sessions or renderer reloads. Disable this option to start and arm manually."));
         if (state.storage) body.append(element("p", "form-note",
           `Configuration file: ${state.storage.path}\n` +
           (state.storage.isOneDrive
@@ -1028,7 +1028,7 @@
 
   function openSchedules() {
     showDialog("Recurring agent tasks",
-      "Run only while this app is open. Automatic startup can run saved panes immediately and arm their schedules on app launch; disable it in Settings for manual review/arming. Running or queued panes are never interrupted; missed runs are not replayed.",
+      "Run only while this app is open. Automatic startup runs saved panes 10 seconds apart and arms their schedules on app launch; disable it in Settings for manual review/arming. Running or queued panes are never interrupted; missed runs are not replayed.",
       null, body => {
         const render = () => {
           body.replaceChildren();
@@ -1258,7 +1258,7 @@
       body.append(element("p", "form-note",
         "Each pane owns an independent ConPTY and PowerShell process tree. Tabs and layout changes do not restart sessions. " +
         "Separate shells are not filesystem or security isolation; use Git worktrees for independent edits.\n\n" +
-        "Saved workspaces auto-start all panes and arm recurring tasks by default when the app opens, without a review dialog. Disable automatic startup in Settings for manual-only launches. Import and backup recovery leave sessions unstarted in the current app session; the next normal launch follows that setting. " +
+        "Saved workspaces auto-start all panes and arm recurring tasks by default when the app opens, without a review dialog. The first eligible pane starts immediately; subsequent automatic pane starts are spaced 10 seconds apart across all tabs. Disable automatic startup in Settings for manual-only launches. Import and backup recovery leave sessions unstarted in the current app session; the next normal launch follows that setting. " +
         "Running means only that the shell is alive. Output or silence is never interpreted as completion.\n\n" +
         "Optional explicit PowerShell integration:\n" +
         "Send-PromptTerminalSignal -State working -Message 'Started task'\n" +
